@@ -1,0 +1,15 @@
+# Secrets — never commit real keys
+.env
+.env.*
+!.env.example
+
+# n8n local data
+.n8n/
+*.sqlite
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log

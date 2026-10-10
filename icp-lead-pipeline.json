@@ -1,0 +1,2433 @@
+{
+  "name": "ICP Lead Scoring & Reply Pipeline (Demo)",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "// Extract email fields from Gmail Trigger output\nconst item = $input.first().json;\n\nconst subject = item.subject || item.headers?.subject || '';\n\n// Gmail returns 'from' as object {address, name}, array, or string\nconst fromField = item.from;\nlet from_name = '';\nlet from_email = '';\n\nif (Array.isArray(fromField)) {\n  from_name = fromField[0]?.name || '';\n  from_email = fromField[0]?.address || '';\n} else if (typeof fromField === 'object' && fromField !== null) {\n  from_name = fromField.name || '';\n  from_email = fromField.address || '';\n} else if (typeof fromField === 'string') {\n  const match = fromField.match(/<(.+?)>/);\n  if (match) {\n    from_email = match[1];\n    from_name = fromField.replace(/<.+?>/, '').replace(/\"/g, '').trim();\n  } else {\n    from_email = fromField.trim();\n  }\n}\n\n// Get body and sanitize for JSON safety\nlet body = item.textPlain || item.text || item.snippet || item.body || '';\nif (!body && item.html) { body = item.html.replace(/<[^>]*>/g, ' '); }\nbody = body.replace(/\\r\\n/g, ' ').replace(/\\n/g, ' ').replace(/\\r/g, ' ').replace(/\\t/g, ' ');\nbody = body.replace(/[\\x00-\\x1F\\x7F]/g, '');\nbody = body.replace(/\\s+/g, ' ').trim();\n\nconst received_at = item.date || item.internalDate || new Date().toISOString();\n\nreturn [{ json: { subject, from_name, from_email, body, received_at } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2208,
+        -48
+      ],
+      "id": "caad8079-4f85-4fea-8022-7db8e114efb9",
+      "name": "Extract Email Fields",
+      "notes": "Normalises the Gmail Trigger output into the five standard fields the pipeline expects: subject, from_name, from_email, body, received_at. Handles Gmail's object-based 'from' field format ({address, name}) and sanitises the email body by stripping newlines, tabs, and control characters that would break downstream JSON templates."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.GROQ_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"stream\": false,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Read the email below and classify it into exactly ONE of these three paths.\\n\\nDo NOT route based on keywords in the subject line alone. Read the full email body carefully before deciding.\\n\\n'k' - A business or organisation inquiring about AI consulting, CRM intelligence, data platform services, business transformation, or professional services. The sender wants to BUY Acme AI's consulting or AI services. This applies to companies from ANY industry \u2014 retail, SaaS, finance, healthcare, manufacturing \u2014 as long as they want AI or consulting services.\\n\\n'consumer' - An individual person inquiring about buying furniture or home products for personal use at their home address. They are asking about specific products, prices, stock, or delivery.\\n\\n'retail' - A business owner or retailer inquiring SPECIFICALLY about wholesale furniture purchasing, bulk orders, minimum order quantities, trade pricing, or stocking furniture products in their store to resell.\\n\\nCRITICAL RULES:\\n- If the email mentions AI, CRM, data platform, digital transformation, or consulting services = always 'k', regardless of what industry the sender works in.\\n- A retail company or retail chain wanting AI or consulting services = 'k', NOT 'retail'.\\n- 'retail' is ONLY for businesses wanting to buy furniture wholesale to stock in their store.\\n- When in doubt between 'k' and 'retail' = choose 'k'.\\n\\nReturn ONLY one of these exact values: k, consumer, retail\\nNo explanation. No markdown. Just the single word.\\n\\nEmail subject: {{$json.subject}}\\nSender email: {{$json.from_email}}\\nEmail body: {{$json.body}}\"\n    }\n  ],\n  \"temperature\": 0,\n  \"max_tokens\": 10,\n  \"seed\": 0,\n  \"top_p\": 1\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -192,
+        272
+      ],
+      "id": "dfa8b3e2-c3f5-47bf-9ba3-b536bd688834",
+      "name": "Detect Path",
+      "notes": "Calls Cerebras LLM to classify the email into one of three paths: 'k' (Acme AI B2B professional services), 'consumer' (Lumen Living individual furniture buyer), or 'retail' (Lumen Living wholesale/retail partner). Returns a single word classification used by the Route by Path switch node."
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\n\nlet raw =\n  item.choices?.[0]?.message?.content ??\n  item.data?.choices?.[0]?.message?.content ??\n  '';\n\nif (typeof raw !== 'string') {\n  return [{ json: { path: 'k', parse_error: true } }];\n}\n\nraw = raw.trim().toLowerCase().replace(/[^a-z]/g, '');\n\nconst validPaths = ['k', 'consumer', 'retail'];\nconst path = validPaths.includes(raw) ? raw : 'k';\n\nlet emailData = {};\ntry { emailData = $('Parse Original Body').first()?.json || {}; }\ncatch(e) { emailData = {}; }\n\nreturn [{ json: {\n  subject:     emailData.subject     || '',\n  from_name:   emailData.from_name   || '',\n  from_email:  emailData.from_email  || '',\n  body:        emailData.body        || '',\n  received_at: emailData.received_at || '',\n  path\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        32,
+        272
+      ],
+      "id": "0143813b-e7fd-4b65-95a4-7ef979708426",
+      "name": "Parse Path",
+      "notes": "Parses the LLM classification response and extracts the path value (k, consumer, or retail). Falls back to 'k' if the response is invalid. Also carries forward the original email fields (subject, from_name, from_email, body, received_at) for the downstream extraction nodes."
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{$json.path}}",
+                    "rightValue": "k",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "d6a551cd-688e-4a9c-b4bd-19988c9e546d"
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{$json.path}}",
+                    "rightValue": "consumer",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "355c905d-7bc5-4340-9564-2b98a95fd4a0"
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{$json.path}}",
+                    "rightValue": "retail",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "04dae87c-3adb-4718-a866-29c1a123f775"
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        256,
+        256
+      ],
+      "id": "7a36e48f-fed1-4eb6-97ca-130be203ce52",
+      "name": "Route by Path",
+      "notes": "Switch node that routes the lead to the correct LLM extraction prompt based on the classified path. Output 0 = K (Acme AI B2B), Output 1 = Consumer (Lumen Living individual), Output 2 = Retail (Lumen Living wholesale). Each path has its own field extraction prompt tailored to that business context."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.GROQ_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"stream\": false,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"You are a CRM lead qualification assistant for Acme AI, an Australian B2B AI consulting firm. All clients are based in Australia or dealing in Australian dollars unless explicitly stated otherwise.\\n\\nRead the email below and extract structured lead information.\\n\\nReturn ONLY valid JSON with this exact structure:\\n{\\n  \\\"sender_name\\\": \\\"\\\",\\n  \\\"sender_email\\\": \\\"\\\",\\n  \\\"company_name\\\": \\\"\\\",\\n  \\\"team_size\\\": \\\"\\\",\\n  \\\"stated_revenue_aud\\\": \\\"\\\",\\n  \\\"sector_fit_signal\\\": \\\"\\\",\\n  \\\"sector_fit_confidence\\\": \\\"\\\",\\n  \\\"exec_sponsor_signal\\\": \\\"\\\",\\n  \\\"ai_appetite_signal\\\": \\\"\\\",\\n  \\\"budget_timeline_signal\\\": \\\"\\\",\\n  \\\"relationship_signal\\\": \\\"\\\",\\n  \\\"budget_signal\\\": \\\"\\\",\\n  \\\"timeline_signal\\\": \\\"\\\",\\n  \\\"price_shopping\\\": false,\\n  \\\"cannot_influence\\\": false,\\n  \\\"fields_inferred\\\": 0\\n}\\n\\n---\\n\\n- sender_name: full name of the person writing. Empty string if not found.\\n\\n- sender_email: email address of the sender. Empty string if not found.\\n\\n- company_name: exact company name if explicitly mentioned. Empty string if not found. Do not infer from email domain.\\n\\n- team_size: a number only if explicitly mentioned. Empty string if not found.\\n\\n- stated_revenue_aud: company annual revenue or turnover as a full integer in AUD only if explicitly stated. Examples: 80000000 for $80M, 90000000 for $90M ARR. If given in EUR multiply by 1.65. If given in GBP multiply by 1.95. Empty string if not mentioned.\\n  HARD RULES:\\n  - Acme AI is an Australian firm. Any dollar sign '$' = Australian dollars (AUD) by default. Never assume USD unless the email explicitly says 'USD', 'US dollars', or 'US$'.\\n  - stated_revenue_aud is the company ANNUAL REVENUE or TURNOVER only. Never use a project budget, initiative budget, or allocated spend figure as revenue.\\n  - If the email contains both a revenue figure and a budget figure, always use the revenue or turnover figure here and ignore the budget figure entirely.\\n  - ALL ARR figures are Australian dollars (AUD) unless the email explicitly states USD, EUR, or GBP.\\n  - '$90M ARR' = 90000000. '$150M ARR' = 150000000. Never multiply by 1.55 unless USD is stated.\\n  - Only convert to AUD if the email explicitly says 'USD' (x1.55), 'EUR' or 'euros' (x1.65), 'GBP' or 'pounds' (x1.95).\\n\\n---\\n\\n- sector_fit_signal: classify the company PRIMARY industry into exactly one of: core, adjacent, problem_match, no_fit.\\n\\n  'core' = Organisation's primary business activity matches one of the following ANZSIC Divisions, each confirmed by at least one named Acme AI client.\\n  Division O \u2014 Public Administration and Safety: government department, statutory body, local council, regulatory authority, policy body, utilities. Named clients: Australian Government departments, NSW/VIC/QLD departments, Austrade, VLRC, AIMS, Water NSW, CenITex, Fraser Coast, Northern Beaches, Macedon Ranges.\\n  Division K \u2014 Financial and Insurance Services: bank, superannuation fund, insurance company, investment manager, credit union, mortgage lender, infrastructure investment fund. Named clients: ANZ, ASFA, ATC Insurance, Avant Insurance, Community First Credit Union, Defence Bank, Hunter Hall, Plenary, RAMS.\\n  Division P \u2014 Education and Training: university, college, school, vocational institute, admissions body, pathway education provider, specialist education. Named clients: ACU, RMIT, La Trobe, Federation University, Monash College, VTAC, William Angliss, Lyc\u00e9e Condorcet, Autism Teaching Institute.\\n  Division M \u2014 Professional Scientific and Technical Services: law firm, consulting firm, compliance provider, training and compliance, recruitment agency. Named clients: MinterEllison, Archway Group, CompliSpace, Safetycare, Drake International.\\n  Division H \u2014 Accommodation and Food Services: luxury hotel, hotel group, resort, ski resort, destination management, restaurant. Named clients: InterContinental Sydney, Holiday Inn, Lancemore Group, TFE Hotels, Falls Creek Resort, Ducks Nuts.\\n  Division R \u2014 Arts and Recreation Services: contemporary art institution, national sporting body, state sporting body, publisher, media production. Named clients: Australian Centre for Contemporary Art, Surfing Australia, Surfing NSW.\\n  Division Q \u2014 Health Care and Social Assistance: social services organisation, veterans support body, charity, not-for-profit social services. Named clients: Berry Street, Relationships Australia, Adopt Change, Legacy Australia.\\n  Division S \u2014 Other Services / Not-for-Profit: religious organisation, community services, veterans support. Named clients: Anglican Church General Synod, Legacy Australia.\\n  Division N \u2014 Administrative and Support Services: business events, convention bureau, ticketing service, venue management, events company. Named clients: Business Events Sydney, Playbill, Sydney Showground.\\n  Division I \u2014 Transport Postal and Warehousing: public transport operator. Named clients: Yarra Trams.\\n  Division J \u2014 Information Media and Telecommunications: publisher, media company, media production, broadcasting. Named clients: News Corp, Art Edited, Magnesium Media.\\n\\n  'adjacent' = Industry is different but close enough that Acme AI's core methodology transfers with minor adaptation.\\n  Division G \u2014 Retail Trade: retail chain, homewares retailer, apparel brand, action sports brand, liquor retail. Named clients: Globe International, Sheridan Australia, Liquor Marketing Group.\\n  Division L \u2014 Rental Hiring and Real Estate Services: property management firm, student accommodation provider, real estate agency. Named clients: Campus Living Villages, Goodman Property Services.\\n  Division C \u2014 Manufacturing (agrichemical and crop science ONLY): agrichemical company, crop science company. Named client: Nufarm Australia. All other manufacturing = NO FIT.\\n  Division A \u2014 Agriculture Forestry and Fishing (agrichemical only): agrichemical, crop science. Primary farming and livestock = NO FIT.\\n  Division B \u2014 Mining (industry body and advocacy ONLY): mining advocacy body, industry association for mining. Named client: Minerals Council of Australia. Mining operations themselves = NO FIT.\\n  Technology / SaaS platforms: SaaS company, HR tech, property tech, sports tech platform. Named clients: Livehire, PEXA, GolfSpace.\\n  Consumer Goods: FMCG company, hospitality products supplier, consumer goods brand. Named clients: Nestle Australia, Vanity Group.\\n\\n  'problem_match' = Sector is outside core AND adjacent BUT the email explicitly states a problem that maps onto a Acme AI service. Accept ONLY if one of the following is explicitly stated \u2014 do not infer: we need an AI platform, we are building an AI solution, we need a CRM or our CRM is not working, we need a knowledge management system, we have data we do not know how to use, we need AI governance, we need a data infrastructure or data platform.\\n\\n  'no_fit' = Industry would require Acme AI to redesign its offering from scratch. No problem overlap.\\n  Includes: heavy manufacturing (coatings, industrial, wool processing), mining operations, construction, electricity/gas/waste, wholesale trade, primary agriculture/livestock.\\n  Important: if sector is unclear or not stated, assign no_fit and set sector_fit_confidence to inferred.\\n\\n  RULES:\\n  - Never assign core based on problem statement alone \u2014 sector must match first.\\n  - When choosing between two levels always go LOWER not higher.\\n  - A luxury hotel or hotel group = core (Division H). A small cafe or restaurant with no hotel group context = no_fit.\\n  - Only use problem_match if sector is outside BOTH core AND adjacent AND the problem is explicitly stated.\\n\\n---\\n\\n- sector_fit_confidence: exactly one of:\\n  'stated' = The lead explicitly stated their industry or business type in the email. ANZSIC division confirmed directly from their words.\\n  'inferred' = The lead did NOT explicitly state their industry. AI had to infer from company name, email domain, or context. If inferred, increment fields_inferred by 1 even if all other 5 attributes are fully stated.\\n\\n---\\n\\n- exec_sponsor_signal: exactly one of: named_mandate, engaged_no_mandate, will_find, none.\\n\\n  'named_mandate' = A named executive sponsor is confirmed. Rep can state their name and title. They have budget authority and are actively driving the initiative. The SENDER must be the sponsor themselves \u2014 proxy contacts cannot be named_mandate.\\n  Signal words: our CTO is driving this, the CEO wants to, our CDO has signed off, the board has approved, X is sponsoring this project.\\n\\n  'engaged_no_mandate' = A senior contact is engaged and interested but has not yet secured formal sign-off or budget authority. Also use when the sender is a proxy reaching out on behalf of a named person driving the initiative.\\n  Signal words: I'm pushing for this internally, I want to get this approved, I'm trying to get budget for this.\\n\\n  'will_find' = No sponsor identified yet AND the contact explicitly says they will find one or escalate to a decision maker.\\n  Signal words: I need to find the right person to own this, I'll speak to my manager, I'm not sure who would own this, I have not been able to get sign-off yet, I am hoping to build the business case.\\n\\n  'none' = No internal owner exists and the contact gives no indication of finding one. Contact is simply curious or exploring with no organisational backing and no plan to escalate.\\n  Signal words: just curious, wanted to explore, not sure if this is right for us, just checking, no mention of any internal stakeholder at all.\\n\\n  RULES:\\n  - named_mandate requires ALL THREE: named person + confirmed budget authority + actively driving. Missing any one = not named_mandate.\\n  - Proxy sender = engaged_no_mandate at most. Never named_mandate.\\n  - 'I have not been able to get sign-off yet' or 'I am hoping to build the business case' = will_find.\\n  - No mention of any internal stakeholder, decision maker, manager, or sponsor at all = none.\\n  - When in doubt always go LOWER not higher.\\n\\n---\\n\\n- ai_appetite_signal: exactly one of: mandate_approved, mandate_pending, personal_initiative, curiosity. Empty string if no AI mention at all.\\n\\n  'mandate_approved' = Organisation has made a formal decision to invest in AI AND budget approved by finance or board. Both mandate and funding exist.\\n  Signal words: we have an approved AI budget, the board has approved, we've allocated funds, we have a mandate to move forward with AI.\\n\\n  'mandate_pending' = Leadership has decided to invest in AI but budget is still moving through finance approval.\\n  Signal words: we're waiting for budget approval, the initiative has been agreed but not yet funded.\\n\\n  'personal_initiative' = The contact personally wants to pursue AI but has not taken it to leadership or secured organisational backing.\\n  Signal words: I personally think we should do this, I've been trying to get this off the ground, I'm exploring this on my own, I have been pushing for this but have not got sign-off.\\n\\n  'curiosity' = Organisation is exploring AI but has no investment plan, no timeline, no concrete next step.\\n  Signal words: we've been thinking about AI, we're curious about what's possible, not sure if AI is right for us, just exploring.\\n\\n  RULES:\\n  - Never return empty if any AI mention exists \u2014 minimum is curiosity.\\n  - mandate_approved requires BOTH: formal decision confirmed AND budget approved by finance or board.\\n\\n---\\n\\n- budget_timeline_signal: exactly one of: both_clear, one_clear, both_approximate, neither.\\n\\n  'both_clear' = Lead can state an approximate budget range AND a target decision quarter. Both confirmed.\\n  Signal words: we have roughly X budget, we want to decide by Q3, our timeline is six months.\\n\\n  'one_clear' = One confirmed clearly; the other is approximate but plausible.\\n  Signal words: we have some budget but haven't finalised the amount, we want to start soon but haven't set a date.\\n\\n  'both_approximate' = Lead gives rough ranges for BOTH budget AND timeline \u2014 neither confirmed but both positively stated.\\n  Signal words: probably around X, maybe next year, sometime in the first half, we're thinking roughly X budget.\\n\\n  'neither' = Lead cannot state any budget range or any timeline. No internal conversations have happened.\\n  Signal words: no budget in mind, no particular timeline, don't have a budget, not sure of the timeline.\\n\\n  RULES:\\n  - 'I do not have a budget and no particular timeline' = neither. No exceptions.\\n  - 'I don't have a budget in mind' = neither.\\n  - Any sentence with 'don't have', 'not sure', 'no budget', 'no timeline', 'haven't confirmed' = neither unless a specific number or quarter is also explicitly stated.\\n  - Wanting to 'start a conversation' or 'have an introductory call' is NOT a budget or timeline signal = neither.\\n  - both_approximate requires BOTH budget AND timeline to be positively stated as rough ranges.\\n  - When in doubt always go LOWER not higher.\\n\\n---\\n\\n- relationship_signal: exactly one of: trusted_intro, general_intro, event_met, cold. Empty string if cannot be determined.\\n\\n  'trusted_intro' = Lead introduced by a confirmed existing Acme AI client, partner, or close colleague. Email must explicitly state the referrer is an existing Acme AI client or has worked with Acme AI.\\n  Signal words: referred by X who is your client, X who worked with you suggested I reach out.\\n\\n  'general_intro' = Lead introduced by someone known to Acme AI but not confirmed as an existing client.\\n  Signal words: X suggested I contact you, I got your name from X, someone mentioned you.\\n\\n  'event_met' = Lead met Acme AI at a conference, webinar, or industry event.\\n  Signal words: we met at, I saw your talk at, I attended your webinar, I spoke to you at the summit.\\n\\n  'cold' = No prior relationship. Found Acme AI online, LinkedIn, website.\\n  Signal words: found your website, came across on LinkedIn, saw your post online.\\n\\n  RULES:\\n  - 'X suggested I contact you' alone = general_intro. Never trusted_intro unless email explicitly says X is an existing Acme AI client.\\n  - 'Found your website online' or 'came across on LinkedIn' = cold.\\n\\n---\\n\\n- budget_signal: exact number or range if explicitly stated. Empty string if vague or missing.\\n- timeline_signal: exact timeframe if explicitly stated. Empty string if vague or missing.\\n- price_shopping: true if comparing costs across vendors with price-only questions. false otherwise.\\n- cannot_influence: true if contact confirmed they cannot reach or influence the final decision maker. false otherwise.\\n- fields_inferred: count of how many of these 6 attributes you had to INFER because the information was COMPLETELY ABSENT from the email \u2014 sector_fit_signal, exec_sponsor_signal, ai_appetite_signal, budget_timeline_signal, relationship_signal, stated_revenue_aud. Also increment by 1 if sector_fit_confidence = inferred even if all other 5 are fully stated. Return 0 to 6.\\n\\n---\\n\\nGENERAL RULES:\\n- Return only the JSON object. No markdown. No explanations.\\n- Only use values from the controlled vocabulary listed above.\\n- Conservative classification always. When choosing between two levels pick the lower one.\\n- Never upgrade a classification based on assumptions.\\n- Use signal words as guides but paraphrased equivalents count.\\n\\nEmail subject: {{$json.subject}}\\nSender name: {{$json.from_name}}\\nSender email: {{$json.from_email}}\\nEmail body: {{$json.body}}\"\n    }\n  ],\n  \"temperature\": 0,\n  \"max_tokens\": 600,\n  \"seed\": 0,\n  \"top_p\": 1\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        480,
+        64
+      ],
+      "id": "95c21f4a-0d94-445d-aa02-f460711b787d",
+      "name": "LLM Extract K",
+      "notes": "Calls Cerebras LLM with the Acme AI B2B extraction prompt. Extracts structured fields from the email: sender_name, sender_email, company_name, team_size, stated_revenue_aud, sector_fit_signal, exec_sponsor_signal, ai_appetite_signal, budget_timeline_signal, relationship_signal, budget_signal, timeline_signal, price_shopping, cannot_influence_decision, fields_inferred. Uses controlled vocabulary with conservative defaults."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.GROQ_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"stream\": false,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"You are a CRM lead extraction assistant for Lumen Living, a luxury Vietnamese furniture brand.\\n\\nRead the customer message below and extract structured information.\\n\\nReturn ONLY valid JSON with this exact structure \u2014 no markdown, no explanation:\\n{\\n  \\\"sender_name\\\": \\\"\\\",\\n  \\\"sender_email\\\": \\\"\\\",\\n  \\\"sender_phone\\\": \\\"\\\",\\n  \\\"extracted_city\\\": \\\"\\\",\\n  \\\"extracted_district\\\": \\\"\\\",\\n  \\\"product_category\\\": \\\"\\\",\\n  \\\"purchase_intent_signal\\\": \\\"\\\",\\n  \\\"product_fit_signal\\\": \\\"\\\",\\n  \\\"buyer_urgency_signal\\\": \\\"\\\",\\n  \\\"source_channel_signal\\\": \\\"\\\",\\n  \\\"designer_flag\\\": false,\\n  \\\"price_shopping\\\": false,\\n  \\\"is_custom\\\": false\\n}\\n\\n---\\n\\n- sender_name: full name of the person sending the message. Empty string if not provided.\\n- sender_email: email address of the sender. Empty string if not provided.\\n- sender_phone: phone number of the sender. Empty string if not provided.\\n- extracted_city: city the customer is based in or wants delivery to. Empty string if not mentioned.\\n- extracted_district: district within the city. Empty string if not mentioned.\\n\\n- product_category: the specific product the customer is asking about. Use the product name if mentioned (e.g. 'Oslo dining set', 'Stilt Sofa'). If they ask about a general category use that (e.g. 'sofa', 'dining table', 'bed'). Empty string if no product mentioned.\\n\\n---\\n\\n- purchase_intent_signal: classify the customer's buying intent into exactly one of: direct_intent, high_interest, passive_interest, no_signal.\\n\\n  'direct_intent' = asking about price, availability, ordering, delivery, or payment. Ready to buy or very close.\\n  Signal words: how much, price, cost, order, buy, purchase, available, delivery, payment, can I get, want to buy.\\n\\n  'high_interest' = strong interest but not yet asking about price or ordering. Asking for photos, dimensions, collections, styles, options.\\n  Signal words: interested in, love your, can you show, what collections, do you have, looking for, photos, dimensions.\\n\\n  'passive_interest' = casual browsing with no clear intent. Just looking, for future reference, someday.\\n  Signal words: just looking, no rush, someday, future reference, browsing, curious.\\n\\n  'no_signal' = cannot determine any intent from the message.\\n\\n  RULES:\\n  - Default to 'high_interest' for ambiguous cases.\\n  - A customer asking for photos, dimensions, or product details = high_interest not passive_interest.\\n\\n---\\n\\n- product_fit_signal: classify how well the requested product fits Lumen Living's range into exactly one of: similar, custom_order, unavailable.\\n\\n  Lumen Living sells: sofas, armchairs, dining tables, dining chairs, beds, bed frames, sideboards, shelving, coffee tables, side tables, foosball tables, chess sets, outdoor furniture, home decor accessories.\\n\\n  'similar' = product is in or close to Lumen Living's range. Default for all furniture and home decor enquiries.\\n  'custom_order' = customer is asking for a custom size, colour, or modification.\\n  Signal words: custom, bespoke, made to measure, specific size, can you make.\\n  'unavailable' = product is completely outside Lumen Living's range. Must be unambiguous \u2014 electronics, clothing, food, appliances, automotive only.\\n\\n  RULES:\\n  - Default to 'similar' for all furniture and home decor enquiries.\\n  - Only use 'unavailable' if the product is clearly and unambiguously outside the range.\\n  - If no product is mentioned, return 'similar'.\\n\\n---\\n\\n- buyer_urgency_signal: classify into exactly one of: immediate, normal, unknown.\\n\\n  'immediate' = Customer explicitly states a deadline, project timeline, or same-day need.\\n  Signal words: urgent, ASAP, this week, need today, 3D model, client is waiting, presentation tomorrow, confirmed price, confirmed lead time, won't include unless confirmed, substitute something else.\\n  \\n  'normal' = No urgency language detected but message contains at least one of the following: customer names a specific product, asks about price, asks about stock or availability, asks about delivery. Active interest present but no time pressure. Standard buying behaviour with no time pressure.\\n  \\n  'unknown' = No urgency language and no buying signal present. Message is exploratory, passive, too short to classify, or in an unsupported language. Do not penalise \u2014 default to normal routing.\\n\\n  RULES:\\n  - Default to 'normal' for most enquiries.\\n  - Only use 'unknown' if message is genuinely too short or ambiguous.\\n\\n---\\n\\n- source_channel_signal: classify how the customer found Lumen Living into exactly one of: paid_ad_click, direct_message, organic_comment, cold_unknown.\\n\\n  Choose only ONE. Never combine. If signals for more than one are present, pick the strongest \u2014 the order below is strongest to weakest.\\n\\n  'paid_ad_click' = customer references an ad, sponsored post, or promotion.\\n  Signal words: saw your ad, clicked your ad, sponsored post, your promotion, shop now, ad came up on my feed.\\n  Do NOT choose this if they only say they 'saw' the product without referencing an ad or promotion specifically.\\n\\n  'direct_message' = customer sought the store out themselves, with no ad or post prompting them.\\n  Signal words: found your page, found your website, looked you up, searched for furniture, came across your page, sent you a message, DM.\\n\\n  'organic_comment' = customer references seeing a post, story, or tagged content \u2014 but no ad.\\n  Signal words: saw your post, saw your Instagram, saw your Facebook, saw your story, someone tagged you, I follow your page.\\n\\n  'cold_unknown' = no reference at all to how they found the store. No ad, post, search, or referral mentioned. Default to this when no channel signal is present. Do not infer a higher bucket without explicit evidence.\\n\\n---\\n\\n- designer_flag: true if the customer identifies themselves as an interior designer, architect, or trade professional. false otherwise.\\n  Signal words: interior designer, architect, trade account, professional discount, I design for clients, FF&E consultant, 3D model, client project, for my client, specification.\\n\\n- price_shopping: true if the customer is explicitly comparing prices across multiple stores or asking which store is cheapest.\\n  Look for: mentioning they checked or visited other stores, asking which is cheapest, comparing your price to another store, saying another store offers it cheaper.\\n  Examples: 'I also checked IKEA', 'comparing prices between stores', 'another store has it for less', 'which is the cheapest option'.\\n  false if they are only asking about your price without comparing to other stores.\\n\\n- is_custom: true if the customer is asking for a custom size, colour, material, or modification. false otherwise.\\n\\n---\\n\\nGENERAL RULES:\\n- Return only the JSON object. No markdown. No explanations.\\n- Preserve all names, numbers, and addresses exactly as they appear.\\n- Default conservatively \u2014 go lower when signals are ambiguous.\\n\\nCustomer message:\\nSubject: {{$json.subject}}\\nBody: {{$json.body}}\"\n    }\n  ],\n  \"temperature\": 0,\n  \"max_tokens\": 400,\n  \"seed\": 0,\n  \"top_p\": 1\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        928,
+        368
+      ],
+      "id": "9f356a6f-1647-4a65-9903-a8fef9792a99",
+      "name": "LLM Extract Consumer",
+      "notes": "Calls Cerebras LLM with the Lumen Living consumer extraction prompt. Extracts: sender_name, sender_email, product_requested, purchase_intent_signal, location_signal, product_fit_signal, source_channel_signal, contact_completeness_signal, fields_inferred. Tailored to individual furniture buyers in Ho Chi Minh City."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.GROQ_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"stream\": false,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"You are a lead qualification assistant for Lumen Living, a luxury furniture brand in Vietnam.\\n\\nRead the business inquiry below and extract structured lead information.\\n\\nReturn ONLY valid JSON with this exact structure \u2014 no markdown, no explanation:\\n{\\n  \\\"sender_name\\\": \\\"\\\",\\n  \\\"sender_email\\\": \\\"\\\",\\n  \\\"sender_phone\\\": \\\"\\\",\\n  \\\"company_name\\\": \\\"\\\",\\n  \\\"store_count\\\": null,\\n  \\\"extracted_city\\\": \\\"\\\",\\n  \\\"extracted_district\\\": \\\"\\\",\\n  \\\"wholesale_intent_signal\\\": \\\"\\\",\\n  \\\"business_legitimacy_signal\\\": \\\"\\\",\\n  \\\"order_volume_signal\\\": \\\"\\\",\\n  \\\"product_range_signal\\\": \\\"\\\",\\n  \\\"relationship_source_signal\\\": \\\"\\\",\\n  \\\"price_shopping\\\": false\\n}\\n\\n---\\n\\n- sender_name: full name of the person writing. Empty string if not found.\\n- sender_email: email address if present. Empty string if not found.\\n- sender_phone: phone number if present. Empty string if not found.\\n- company_name: exact proper business name if explicitly mentioned. Empty string if not found. Do not infer from email domain. A description like 'a home goods store' or 'my shop' is NOT a company name.\\n- store_count: number of store locations if explicitly stated as an integer. null if not mentioned.\\n- extracted_city: city or province name mentioned. Empty string if not found.\\n- extracted_district: district name or number if mentioned. Empty string if not found.\\n\\n---\\n\\n- wholesale_intent_signal: classify into exactly one of: explicit_wholesale, moq_volume, range_inquiry, no_b2b_signal.\\n\\n  'explicit_wholesale' = Retailer explicitly asks about wholesale pricing, trade accounts, MOQ, margin structure, distributor agreements, or trade terms. Clearest possible B2B buying language.\\n  Signal words: wholesale price, trade account, trade terms, margin, reseller, distributor, can we open an account, payment terms.\\n\\n  'moq_volume' = Retailer asks about minimum order quantity, volume discounts, or bulk pricing without explicitly mentioning trade terms.\\n  Signal words: MOQ, minimum order, how many units, volume discount, bulk order, bulk price, large quantity.\\n\\n  'range_inquiry' = Retailer asks about the product catalogue, styles, or range broadly, OR expresses intent to stock or carry the products without asking about wholesale pricing or trade terms. Stocking interest or exploration \u2014 not a trade-pricing question.\\n  Signal words: what products do you carry, catalogue, what styles, collections, interested in stocking, want to carry your range, looking to add your products, just exploring, thinking about, for the future.\\n\\n  'no_b2b_signal' = No wholesale language at all. Message reads as a standard retail inquiry about a single item for personal use. Fires TP7 to re-route to the consumer path.\\n\\n  RULES:\\n  - explicit_wholesale requires explicit mention of wholesale pricing, MOQ, margin, trade terms, or a trade account.\\n  - A retailer who says they want to stock or carry your products but does NOT ask about trade pricing = range_inquiry, not explicit_wholesale.\\n  - When in doubt go LOWER not higher.\\n\\n---\\n\\n- business_legitimacy_signal: classify into exactly one of: full_identity, name_address_only, unverified_claim, no_identity.\\n\\n  'full_identity' = Proper business name + physical store address (or registration) + personal contact (email or phone). All three present.\\n  'name_address_only' = Proper business name AND address present, but the contact given appears personal rather than a business contact.\\n  'unverified_claim' = Sender claims to have a store but provides no verifiable details \u2014 no address and no business contact. Only a store name claim, or only a personal name / store description.\\n  'no_identity' = No business identity at all. No store name, address, or business contact anywhere.\\n\\n  HARD RULES:\\n  - A business name must be a PROPER NAME like 'FreshMart', 'Saigon Home Living', 'ABC Furniture' \u2014 not a description.\\n  - 'a home goods store', 'a furniture store', 'a shop', 'my store', 'I run a store' are descriptions NOT business names.\\n  - full_identity requires ALL THREE: proper business name + address + contact.\\n  - When in doubt go LOWER not higher.\\n\\n---\\n\\n- order_volume_signal: classify into exactly one of: high_volume, clear_single, small_unstated, no_volume_signal.\\n\\n  'high_volume' = 2 or more store locations, OR a stated monthly volume above 10 units.\\n  Signal words: 2 stores, multiple locations, chain, 10+ units a month, container order, ongoing supply.\\n\\n  'clear_single' = A SINGLE store AND the lead explicitly states a number, quantity, or frequency \u2014 e.g. 'around 5 units a month', 'restock every 6 weeks', 'roughly 8 pieces'. Volume must be a countable estimate.\\n  HARD RULE: vague phrases like 'we order steadily', 'consistent orders', 'we run an established store' do NOT qualify \u2014 without a number these are small_unstated.\\n\\n  'small_unstated' = A single store confirmed but NO number, quantity, or frequency stated anywhere. The lead describes their business but gives no countable volume.\\n\\n  'no_volume_signal' = No store count and no volume or quantity information at all.\\n\\n  RULES:\\n  - A single store only reaches clear_single (14) if a real number is stated. No number = small_unstated (7).\\n  - When in doubt go LOWER not higher.\\n\\n---\\n\\n- product_range_signal: classify into exactly one of: specialist, general_with_furniture, adjacent_category, no_overlap.\\n\\n  'specialist' = Furniture or home decor specialist retailer. Direct category match.\\n  Signal words: furniture store, sofa shop, home decor store, homewares retailer, bedroom specialist, interior retail, lifestyle home store.\\n  HARD RULE: a second-hand, used, vintage, or pre-owned furniture store = adjacent_category NOT specialist.\\n\\n  'general_with_furniture' = General merchandise retailer that EXPLICITLY includes furniture or home decor in its range.\\n  RULE: only fires if the retailer explicitly mentions furniture or home products. Default when retailer type is present but not a specialist.\\n\\n  'adjacent_category' = Related but not directly overlapping \u2014 interior design studio, architecture firm, property developer, hotel fit-out, gift shop, boutique, second-hand / vintage / antique furniture.\\n  RULE: second-hand or used furniture = adjacent_category always.\\n\\n  'no_overlap' = Completely unrelated category \u2014 electronics, mobile phones, clothing, fashion, grocery, supermarket, pharmacy, automotive, sports equipment, restaurant, cafe.\\n  HARD RULES:\\n  - Supermarket, grocery, food retailer = no_overlap. No exceptions.\\n  - Electronics store = no_overlap. No exceptions.\\n  - 'household goods' alone without explicit furniture = no_overlap.\\n  - When in doubt go LOWER not higher.\\n\\n---\\n\\n- relationship_source_signal: classify into exactly one of: partner_referral, trade_show, outbound_pursuit, unknown_inbound.\\n\\n  'partner_referral' = Referred by an existing Lumen Living retail partner or known business contact.\\n  Signal words: referred by, recommended by, your partner, told by your distributor, an existing client suggested.\\n\\n  'trade_show' = Met Lumen Living at a trade show, furniture expo, or industry exhibition.\\n  Signal words: trade show, furniture expo, industry fair, we met at, your booth.\\n\\n  'outbound_pursuit' = Lumen Living initiated cold outreach to this lead. Only use if the message clearly indicates Lumen Living reached out first.\\n\\n  'unknown_inbound' = Inbound from an unknown or unattributed source. The lead found you online, via search, or gives no relationship context. Default when no other key clearly applies.\\n\\n  RULES:\\n  - trade_show requires explicit mention of an event.\\n  - 'found you online', 'via Google', 'on LinkedIn', 'on your website' = unknown_inbound.\\n  - Default to unknown_inbound if no relationship signal is present.\\n\\n---\\n\\n- price_shopping: true if the retailer explicitly compares wholesale prices across multiple suppliers. false otherwise.\\n\\n---\\n\\nGENERAL RULES:\\n- Return only the JSON object. No markdown. No explanations.\\n- Only use values from the controlled vocabulary listed above.\\n- Conservative classification always \u2014 when choosing between two levels pick the lower one.\\n- Never upgrade based on assumptions.\\n- Only classify what is directly and explicitly stated.\\n\\nSender name: {{$json.from_name}}\\nSender email: {{$json.from_email}}\\nMessage subject: {{$json.subject}}\\nMessage body: {{$json.body}}\"\n    }\n  ],\n  \"temperature\": 0,\n  \"max_tokens\": 400,\n  \"seed\": 0,\n  \"top_p\": 1\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        928,
+        560
+      ],
+      "id": "deaaa3db-2152-48b0-915f-ff9972e8f5ce",
+      "name": "LLM Extract Retail",
+      "notes": "Calls Cerebras LLM with the Lumen Living wholesale/retail extraction prompt. Extracts: sender_name, sender_email, company_name, store_count, wholesale_intent_signal, business_legitimacy_signal, order_volume_signal, product_range_signal, location_signal, relationship_source_signal, fields_inferred. Tailored to retail partners and wholesalers."
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nlet raw = item.choices?.[0]?.message?.content ?? item.data?.choices?.[0]?.message?.content ?? '';\nif (typeof raw !== 'string') { return [{ json: { parse_error: true, raw_output: raw } }]; }\nraw = raw.trim().replace(/^```json\\s*/i, '').replace(/^```\\s*/i, '').replace(/\\s*```$/, '');\nlet parsed;\ntry { parsed = JSON.parse(raw); }\ncatch (e) { return [{ json: { parse_error: true, raw_output: raw } }]; }\n\nconst path = $('Parse Path').first()?.json?.path || 'k';\nconst emailData = $('Parse Original Body').first()?.json || {};\n\n// stated_revenue_aud \u2014 must be integer or null, never empty string\n// the trigger does numeric comparisons so it needs a real number or null\nconst rawRevenue = parsed.stated_revenue_aud;\nconst stated_revenue_aud = (rawRevenue !== '' && rawRevenue !== null && rawRevenue !== undefined && !isNaN(Number(rawRevenue)))\n  ? parseInt(rawRevenue, 10)\n  : null;\n\n// booleans \u2014 LLM sometimes returns strings 'true'/'false', normalise to real booleans\nconst price_shopping    = parsed.price_shopping === true    || parsed.price_shopping    === 'true';\nconst cannot_influence  = parsed.cannot_influence === true  || parsed.cannot_influence  === 'true'\n                       || parsed.cannot_influence_decision === true || parsed.cannot_influence_decision === 'true';\n\n// fields_inferred \u2014 DO NOT cap at 2 anymore, the v5 trigger uses the real value\n// for confidence calculation. Let the trigger decide confidence level.\nconst fields_inferred = typeof parsed.fields_inferred === 'number'\n  ? Math.min(parsed.fields_inferred, 6)\n  : 0;\n\nreturn [{ json: {\n  path,\n  subject:                emailData.subject             || '',\n  from_name:              emailData.from_name           || '',\n  from_email:             emailData.from_email          || '',\n  detected_language:      emailData.detected_language   || 'en',\n  original_body:          emailData.original_body       || '',\n  sender_name:            parsed.sender_name            ?? '',\n  sender_email:           parsed.sender_email           ?? '',\n  company_name:           parsed.company_name           ?? '',\n  team_size:              parsed.team_size              ?? '',\n  stated_revenue_aud,\n  sector_fit_signal:      parsed.sector_fit_signal      ?? '',\n  sector_fit_confidence:  parsed.sector_fit_confidence  ?? 'inferred',\n  exec_sponsor_signal:    parsed.exec_sponsor_signal    ?? '',\n  ai_appetite_signal:     parsed.ai_appetite_signal     ?? '',\n  budget_timeline_signal: parsed.budget_timeline_signal ?? '',\n  relationship_signal:    parsed.relationship_signal    ?? '',\n  budget_signal:          parsed.budget_signal          ?? '',\n  timeline_signal:        parsed.timeline_signal        ?? '',\n  price_shopping,\n  cannot_influence,\n  fields_inferred\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        704,
+        64
+      ],
+      "id": "39ffc733-520e-4ce7-8599-aa64e1dd18af",
+      "name": "Parse K Fields",
+      "notes": "Parses the raw LLM JSON response for the K (Acme AI) path. Strips markdown code fences, validates JSON, and extracts all 15 structured fields. Returns parse_error: true if the LLM output is malformed. Carries forward the path identifier for downstream routing."
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nlet raw = item.choices?.[0]?.message?.content ?? '';\nif (typeof raw !== 'string') { return [{ json: { parse_error: true, raw_output: raw } }]; }\nraw = raw.trim().replace(/^```json\\s*/i, '').replace(/^```\\s*/i, '').replace(/\\s*```$/, '');\nlet parsed;\ntry { parsed = JSON.parse(raw); }\ncatch (e) { return [{ json: { parse_error: true, raw_output: raw } }]; }\n\nconst emailData = $('Parse Original Body').first()?.json || {};\n\n// \u2500\u2500 SOURCE CHANNEL \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n// Now decided by the LLM (per V5 doc \u00a72.4). Code no longer infers\n// from the body \u2014 just validate the key, fall back to cold_unknown.\nconst validChannels = ['paid_ad_click', 'direct_message', 'organic_comment', 'cold_unknown'];\nconst source_channel_signal = validChannels.includes(parsed.source_channel_signal)\n  ? parsed.source_channel_signal\n  : 'cold_unknown';\n\n// \u2500\u2500 CONTACT COMPLETENESS \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\nconst hasName  = !!(parsed.sender_name  || emailData.from_name);\nconst hasEmail = !!(parsed.sender_email || emailData.from_email);\nconst hasPhone = !!(parsed.sender_phone);\nconst contactCount = [hasName, hasEmail, hasPhone].filter(Boolean).length;\nconst contact_completeness_signal =\n  contactCount >= 3 ? 'full_contact'  :\n  contactCount === 2 ? 'two_of_three' :\n  contactCount === 1 ? 'minimal'      :\n  'no_contact';\n\n// \u2500\u2500 FIELDS INFERRED \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\nconst fields_inferred = [\n  (!parsed.purchase_intent_signal || parsed.purchase_intent_signal === '') ? 1 : 0,\n  (!parsed.extracted_city || parsed.extracted_city === '')                  ? 1 : 0,\n  (!parsed.product_fit_signal || parsed.product_fit_signal === '')          ? 1 : 0,\n  (!parsed.buyer_urgency_signal || parsed.buyer_urgency_signal === '')      ? 1 : 0,\n].reduce((a, b) => a + b, 0);\n// Note: source_channel and contact_completeness are set/validated here,\n// so they are never counted as inferred.\n\n// \u2500\u2500 BOOLEANS \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\nconst designer_flag  = parsed.designer_flag  === true || parsed.designer_flag  === 'true';\nconst price_shopping = parsed.price_shopping === true || parsed.price_shopping === 'true';\nconst is_custom      = parsed.is_custom      === true || parsed.is_custom      === 'true';\n\nreturn [{ json: {\n  path:                        'consumer',\n  subject:                     emailData.subject           || '',\n  from_name:                   emailData.from_name         || '',\n  from_email:                  emailData.from_email        || '',\n  detected_language:           emailData.detected_language || 'en',\n  original_body:               emailData.original_body     || '',\n  sender_name:                 parsed.sender_name          || emailData.from_name  || '',\n  sender_email:                parsed.sender_email         || emailData.from_email || '',\n  sender_phone:                parsed.sender_phone         || '',\n  product_requested:           parsed.product_category     || '',\n  purchase_intent_signal:      parsed.purchase_intent_signal  || 'no_signal',\n  extracted_city:              parsed.extracted_city           || '',\n  extracted_district:          parsed.extracted_district       || '',\n  location_signal:             '',\n  product_fit_signal:          parsed.product_fit_signal       || 'similar',\n  buyer_urgency_signal:        parsed.buyer_urgency_signal     || 'normal',\n  designer_flag,\n  source_channel_signal,\n  contact_completeness_signal,\n  is_custom,\n  price_shopping,\n  fields_inferred\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1152,
+        368
+      ],
+      "id": "98c21752-50ed-4cb3-adc1-34fa6bf218d0",
+      "name": "Parse Consumer Fields",
+      "notes": "Parses the raw LLM JSON response for the Consumer (Lumen Living) path. Strips markdown code fences, validates JSON, and extracts all 9 structured fields. Falls back to safe defaults (location_signal: 'none', product_fit_signal: 'similar') if values are missing."
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nlet raw = item.choices?.[0]?.message?.content ?? '';\nif (typeof raw !== 'string') { return [{ json: { parse_error: true, raw_output: raw } }]; }\nraw = raw.trim().replace(/^```json\\s*/i, '').replace(/^```\\s*/i, '').replace(/\\s*```$/, '');\nlet parsed;\ntry { parsed = JSON.parse(raw); }\ncatch (e) { return [{ json: { parse_error: true, raw_output: raw } }]; }\n\nconst emailData = $('Parse Original Body').first()?.json || {};\n\n// \u2500\u2500 RELATIONSHIP SOURCE \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n// Decided by the LLM (per V5 doc \u00a75.6). Validate the key, fall back to unknown_inbound.\nconst validRelationship = ['partner_referral', 'trade_show', 'outbound_pursuit', 'unknown_inbound'];\nconst relationship_source_signal = validRelationship.includes(parsed.relationship_source_signal)\n  ? parsed.relationship_source_signal\n  : 'unknown_inbound';\n\n// \u2500\u2500 LEGITIMACY GUARD \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n// full_identity / name_address_only REQUIRE a proper business name.\n// The LLM sometimes picks these even when company_name is empty \u2014\n// enforce the rule deterministically here.\nlet business_legitimacy_signal = parsed.business_legitimacy_signal || 'no_identity';\nconst hasCompanyName = !!(parsed.company_name && parsed.company_name.trim() !== '');\n\nif (!hasCompanyName && (business_legitimacy_signal === 'full_identity' || business_legitimacy_signal === 'name_address_only')) {\n  const hasAnyContact = !!(parsed.sender_email || parsed.sender_phone || emailData.from_email);\n  business_legitimacy_signal = hasAnyContact ? 'unverified_claim' : 'no_identity';\n}\n\n// \u2500\u2500 CONTACT COMPLETENESS \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\nconst hasName  = !!(parsed.sender_name  || emailData.from_name);\nconst hasEmail = !!(parsed.sender_email || emailData.from_email);\nconst hasPhone = !!(parsed.sender_phone);\nconst contactCount = [hasName, hasEmail, hasPhone].filter(Boolean).length;\nconst contact_completeness_signal =\n  contactCount >= 3 ? 'full_contact'  :\n  contactCount === 2 ? 'two_of_three' :\n  contactCount === 1 ? 'minimal'      :\n  'no_contact';\n\n// \u2500\u2500 FIELDS INFERRED \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n// Count from absence \u2014 disqualifying signals are stated, not inferred.\nconst fields_inferred = [\n  (!parsed.wholesale_intent_signal || parsed.wholesale_intent_signal === '') ? 1 : 0,\n  (!business_legitimacy_signal     || business_legitimacy_signal     === '') ? 1 : 0,\n  (!parsed.order_volume_signal     || parsed.order_volume_signal     === '') ? 1 : 0,\n  (!parsed.product_range_signal    || parsed.product_range_signal    === '') ? 1 : 0,\n  (relationship_source_signal === 'unknown_inbound')                          ? 1 : 0,\n  (parsed.store_count === null || parsed.store_count === undefined)           ? 1 : 0,\n].reduce((a, b) => a + b, 0);\n\n// \u2500\u2500 BOOLEANS \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\nconst price_shopping = parsed.price_shopping === true || parsed.price_shopping === 'true';\n\n// \u2500\u2500 STORE COUNT \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\nconst store_count = (parsed.store_count !== null && parsed.store_count !== undefined && !isNaN(Number(parsed.store_count)))\n  ? parseInt(parsed.store_count, 10)\n  : null;\n\nreturn [{ json: {\n  path:                        'retail',\n  subject:                     emailData.subject           || '',\n  from_name:                   emailData.from_name         || '',\n  from_email:                  emailData.from_email        || '',\n  detected_language:           emailData.detected_language || 'en',\n  original_body:               emailData.original_body     || '',\n  sender_name:                 parsed.sender_name          || emailData.from_name  || '',\n  sender_email:                parsed.sender_email         || emailData.from_email || '',\n  sender_phone:                parsed.sender_phone         || '',\n  company_name:                parsed.company_name         || '',\n  store_count,\n  extracted_city:              parsed.extracted_city       || '',\n  extracted_district:          parsed.extracted_district   || '',\n  location_signal:             '',\n  wholesale_intent_signal:     parsed.wholesale_intent_signal     || 'no_b2b_signal',\n  business_legitimacy_signal:  business_legitimacy_signal,\n  order_volume_signal:         parsed.order_volume_signal         || 'no_volume_signal',\n  product_range_signal:        parsed.product_range_signal        || 'general_with_furniture',\n  relationship_source_signal,\n  contact_completeness_signal,\n  price_shopping,\n  fields_inferred\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1152,
+        560
+      ],
+      "id": "8b1d0041-3de9-4cf9-9fa4-424ceef319fc",
+      "name": "Parse Retail Fields",
+      "notes": "Parses the raw LLM JSON response for the Retail (Lumen Living wholesale) path. Strips markdown code fences, validates JSON, and extracts all 11 structured fields. Falls back to safe defaults (location_signal: 'none', relationship_source_signal: 'unknown') if values are missing."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "k001",
+              "name": "title",
+              "value": "=[K] {{$json.sender_name}} @ {{$json.company_name}} | {{$json.sender_email}}",
+              "type": "string"
+            },
+            {
+              "id": "k002",
+              "name": "sender_name",
+              "value": "={{$json.sender_name}}",
+              "type": "string"
+            },
+            {
+              "id": "k003",
+              "name": "sender_email",
+              "value": "={{$json.sender_email}}",
+              "type": "string"
+            },
+            {
+              "id": "k004",
+              "name": "company_name",
+              "value": "={{$json.company_name}}",
+              "type": "string"
+            },
+            {
+              "id": "k005",
+              "name": "budget_signal",
+              "value": "={{$json.budget_signal}}",
+              "type": "string"
+            },
+            {
+              "id": "k006",
+              "name": "timeline_signal",
+              "value": "={{$json.timeline_signal}}",
+              "type": "string"
+            },
+            {
+              "id": "k007",
+              "name": "team_size",
+              "value": "={{$json.team_size}}",
+              "type": "string"
+            },
+            {
+              "id": "k008",
+              "name": "review_status",
+              "value": "Pending",
+              "type": "string"
+            },
+            {
+              "id": "k009",
+              "name": "sector_fit_signal",
+              "value": "={{$json.sector_fit_signal}}",
+              "type": "string"
+            },
+            {
+              "id": "k010",
+              "name": "exec_sponsor_signal",
+              "value": "={{$json.exec_sponsor_signal}}",
+              "type": "string"
+            },
+            {
+              "id": "k011",
+              "name": "ai_appetite_signal",
+              "value": "={{$json.ai_appetite_signal}}",
+              "type": "string"
+            },
+            {
+              "id": "k012",
+              "name": "budget_timeline_signal",
+              "value": "={{$json.budget_timeline_signal}}",
+              "type": "string"
+            },
+            {
+              "id": "k013",
+              "name": "relationship_signal",
+              "value": "={{$json.relationship_signal}}",
+              "type": "string"
+            },
+            {
+              "id": "k014",
+              "name": "stated_revenue_aud",
+              "value": "={{$json.stated_revenue_aud}}",
+              "type": "string"
+            },
+            {
+              "id": "k015",
+              "name": "price_shopping",
+              "value": "={{$json.price_shopping}}",
+              "type": "string"
+            },
+            {
+              "id": "k016",
+              "name": "cannot_influence",
+              "value": "={{$json.cannot_influence}}",
+              "type": "string"
+            },
+            {
+              "id": "k017",
+              "name": "fields_inferred",
+              "value": "={{$json.fields_inferred}}",
+              "type": "string"
+            },
+            {
+              "id": "k018",
+              "name": "path",
+              "value": "k",
+              "type": "string"
+            },
+            {
+              "id": "30e00beb-51bc-4fd3-8f6c-19910841dbbf",
+              "name": "sector_fit_confidence",
+              "value": "={{$json.sector_fit_confidence}}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1376,
+        64
+      ],
+      "id": "c7aa7a2f-2395-4162-a24e-aaceb79816ed",
+      "name": "Map K Fields",
+      "notes": "Maps the parsed K fields into the standardised lead record format for Supabase. Sets the title, all extracted signal fields, review_status to 'Pending', and path to 'k'. This is the last path-specific node before the shared pipeline (Prep for Supabase \u2192 Insert \u2192 Score \u2192 Reasons)."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "c001",
+              "name": "title",
+              "value": "=[Consumer] {{$json.sender_name}} | {{$json.sender_email}}",
+              "type": "string"
+            },
+            {
+              "id": "c002",
+              "name": "sender_name",
+              "value": "={{$json.sender_name}}",
+              "type": "string"
+            },
+            {
+              "id": "c003",
+              "name": "sender_email",
+              "value": "={{$json.sender_email}}",
+              "type": "string"
+            },
+            {
+              "id": "c004",
+              "name": "product_requested",
+              "value": "={{$json.product_requested}}",
+              "type": "string"
+            },
+            {
+              "id": "c005",
+              "name": "purchase_intent_signal",
+              "value": "={{$json.purchase_intent_signal}}",
+              "type": "string"
+            },
+            {
+              "id": "c006",
+              "name": "location_signal",
+              "value": "={{$json.location_signal}}",
+              "type": "string"
+            },
+            {
+              "id": "c007",
+              "name": "product_fit_signal",
+              "value": "={{$json.product_fit_signal}}",
+              "type": "string"
+            },
+            {
+              "id": "c008",
+              "name": "source_channel_signal",
+              "value": "={{$json.source_channel_signal}}",
+              "type": "string"
+            },
+            {
+              "id": "c009",
+              "name": "contact_completeness_signal",
+              "value": "={{$json.contact_completeness_signal}}",
+              "type": "string"
+            },
+            {
+              "id": "c010",
+              "name": "fields_inferred",
+              "value": "={{$json.fields_inferred}}",
+              "type": "string"
+            },
+            {
+              "id": "c011",
+              "name": "review_status",
+              "value": "Pending",
+              "type": "string"
+            },
+            {
+              "id": "c012",
+              "name": "path",
+              "value": "consumer",
+              "type": "string"
+            },
+            {
+              "id": "83cd2569-7d6a-4a6b-84b6-62aff8f0035e",
+              "name": "buyer_urgency_signal",
+              "value": "={{$json.buyer_urgency_signal}}",
+              "type": "string"
+            },
+            {
+              "id": "68983f83-0cee-47dc-bfdc-aad5fdcaa38d",
+              "name": "extracted_city",
+              "value": "={{$json.extracted_city}}",
+              "type": "string"
+            },
+            {
+              "id": "bc4d3e23-d8a2-48cb-b47e-ebc0d71319eb",
+              "name": "extracted_district",
+              "value": "={{$json.extracted_district}}",
+              "type": "string"
+            },
+            {
+              "id": "3093f500-8463-43be-9952-db181ed0eecb",
+              "name": "price_shopping",
+              "value": "={{$json.price_shopping}}",
+              "type": "string"
+            },
+            {
+              "id": "59e44af1-37aa-496e-b6df-9b3296bf23fd",
+              "name": "email_subject",
+              "value": "={{$json.subject}}",
+              "type": "string"
+            },
+            {
+              "id": "2d457e0d-6687-447a-8cee-1e1c9d6b217c",
+              "name": "email_body",
+              "value": "={{$json.original_body}}",
+              "type": "string"
+            },
+            {
+              "id": "a0ffcde8-09e4-488f-b71a-05ef1c096d35",
+              "name": "conversation_id",
+              "value": "={{$('Lumen Living Gmail Trigger').first().json.threadId}}",
+              "type": "string"
+            },
+            {
+              "id": "35ceb413-cdf3-4d44-b9d5-7ad15ac9c30a",
+              "name": "translated_body",
+              "value": "={{$('Parse Original Body').first().json.body}}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1376,
+        368
+      ],
+      "id": "59ea78a0-4671-4823-8ba7-c7fbaf23e9d5",
+      "name": "Map Consumer Fields",
+      "notes": "Maps the parsed Consumer fields into the standardised lead record format for Supabase. Sets the title with [Consumer] prefix, consumer-specific fields (product_requested, purchase_intent_signal, etc.), review_status to 'Pending', and path to 'consumer'."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "r001",
+              "name": "title",
+              "value": "=[Retail] {{$json.sender_name}} @ {{$json.company_name}} | {{$json.sender_email}}",
+              "type": "string"
+            },
+            {
+              "id": "r002",
+              "name": "sender_name",
+              "value": "={{$json.sender_name}}",
+              "type": "string"
+            },
+            {
+              "id": "r003",
+              "name": "sender_email",
+              "value": "={{$json.sender_email}}",
+              "type": "string"
+            },
+            {
+              "id": "r004",
+              "name": "company_name",
+              "value": "={{$json.company_name}}",
+              "type": "string"
+            },
+            {
+              "id": "r005",
+              "name": "store_count",
+              "value": "={{$json.store_count}}",
+              "type": "string"
+            },
+            {
+              "id": "r006",
+              "name": "wholesale_intent_signal",
+              "value": "={{$json.wholesale_intent_signal}}",
+              "type": "string"
+            },
+            {
+              "id": "r007",
+              "name": "business_legitimacy_signal",
+              "value": "={{$json.business_legitimacy_signal}}",
+              "type": "string"
+            },
+            {
+              "id": "r008",
+              "name": "order_volume_signal",
+              "value": "={{$json.order_volume_signal}}",
+              "type": "string"
+            },
+            {
+              "id": "r009",
+              "name": "product_range_signal",
+              "value": "={{$json.product_range_signal}}",
+              "type": "string"
+            },
+            {
+              "id": "r010",
+              "name": "location_signal",
+              "value": "={{$json.location_signal}}",
+              "type": "string"
+            },
+            {
+              "id": "r011",
+              "name": "relationship_source_signal",
+              "value": "={{$json.relationship_source_signal}}",
+              "type": "string"
+            },
+            {
+              "id": "r012",
+              "name": "fields_inferred",
+              "value": "={{$json.fields_inferred}}",
+              "type": "string"
+            },
+            {
+              "id": "r013",
+              "name": "review_status",
+              "value": "Pending",
+              "type": "string"
+            },
+            {
+              "id": "r014",
+              "name": "path",
+              "value": "retail",
+              "type": "string"
+            },
+            {
+              "id": "0ba57725-5357-42d6-a3f8-49cfcf51e05c",
+              "name": "extracted_city",
+              "value": "={{$json.extracted_city}}",
+              "type": "string"
+            },
+            {
+              "id": "000a9d0c-80fb-449b-a535-18273d8e2eb7",
+              "name": "extracted_district",
+              "value": "={{$json.extracted_district}}",
+              "type": "string"
+            },
+            {
+              "id": "8e28a383-c9b7-4e3b-907f-0118bcef4717",
+              "name": "email_subject",
+              "value": "={{$json.subject}}",
+              "type": "string"
+            },
+            {
+              "id": "3a5002c9-180f-4046-b024-8e7226252e3b",
+              "name": "email_body",
+              "value": "={{$json.original_body}}",
+              "type": "string"
+            },
+            {
+              "id": "46a3b33d-17bb-49b7-b147-36de2bc2de71",
+              "name": "conversation_id",
+              "value": "={{$('Lumen Living Gmail Trigger').first().json.threadId}}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1376,
+        560
+      ],
+      "id": "b92af6b2-9126-4603-8290-d832bf0bf64c",
+      "name": "Map Retail Fields",
+      "notes": "Maps the parsed Retail fields into the standardised lead record format for Supabase. Sets the title with [Retail] prefix, retail-specific fields (store_count, wholesale_intent_signal, etc.), review_status to 'Pending', and path to 'retail'."
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nreturn [{ json: {\n  ...item,\n  team_size:          item.team_size ? parseInt(item.team_size, 10) : null,\n  store_count:        item.store_count ? parseInt(item.store_count, 10) : null,\n  stated_revenue_aud: item.stated_revenue_aud ? parseInt(item.stated_revenue_aud, 10) : null,\n  fields_inferred:    item.fields_inferred ? parseInt(item.fields_inferred, 10) : 0,\n  price_shopping:     item.price_shopping === 'true' || item.price_shopping === true,\n  cannot_influence:   item.cannot_influence_decision === 'true' || item.cannot_influence_decision === true,\n  created_at:         new Date().toISOString()\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1600,
+        272
+      ],
+      "id": "9fb9082f-c17f-45c2-aff3-698135e145f8",
+      "name": "Prep for Supabase",
+      "notes": "Final data preparation before database insert. Converts string values to proper types: team_size and store_count to integers, stated_revenue_aud to bigint, fields_inferred to integer, price_shopping and cannot_influence to booleans. Adds created_at timestamp. Shared by all three paths (K, Consumer, Retail)."
+    },
+    {
+      "parameters": {
+        "tableId": "crm_leads",
+        "dataToSend": "autoMapInputData"
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        1824,
+        272
+      ],
+      "id": "6c20e24f-5083-4259-ba2a-34f2fe540ecb",
+      "name": "Insert Lead to Supabase",
+      "credentials": {
+        "supabaseApi": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Supabase (set your own)"
+        }
+      },
+      "notes": "Inserts the prepared lead record into the crm_leads table using auto-mapped input data. The Supabase database trigger (score_crm_lead) fires automatically on insert, computing the score, confidence_level, tier, recommended_action, attribute_scores, tp_flags, raw_score, and penalty_total fields."
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "tableId": "crm_leads",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "keyValue": "={{$json.id}}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        2048,
+        272
+      ],
+      "id": "b43f1357-607b-4ade-b6f6-b360bc31e6d0",
+      "name": "Read Scored Row from Supabase",
+      "credentials": {
+        "supabaseApi": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Supabase (set your own)"
+        }
+      },
+      "notes": "Reads back the lead record after insert to get the computed scoring fields. The Supabase trigger (score_crm_lead) runs on INSERT and populates: score, confidence_level, tier, recommended_action, attribute_scores, tp_flags, raw_score, penalty_total. These values are needed for the LLM reason generation and Twenty task creation."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.GROQ_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"stream\": false,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"You are a CRM analyst for Acme AI, a B2B AI consulting firm.\\n\\nA lead has been scored. Generate exactly 3 top reasons explaining the score based on the attribute scores and signals below.\\n\\nReturn ONLY a valid JSON array with this exact structure \u2014 no markdown, no explanation, just the array:\\n[\\n  {\\n    \\\"attribute\\\": \\\"\\\",\\n    \\\"earned\\\": 0,\\n    \\\"max\\\": 0,\\n    \\\"icon\\\": \\\"\\\",\\n    \\\"text\\\": \\\"\\\"\\n  }\\n]\\n\\nAttribute max scores for K-mode:\\n- sector_fit: max 20\\n- revenue: max 20\\n- exec_sponsor: max 20\\n- ai_appetite: max 15\\n- budget_timeline: max 15\\n- relationship: max 10\\n\\nIcon rules \u2014 use the signal value, not the percentage:\\n- 'pass' = top tier signal: core, named_mandate, mandate_approved, both_clear, trusted_intro, sweet_spot revenue\\n- 'partial' = middle tier signal: adjacent, engaged_no_mandate, mandate_pending, one_clear, both_approximate, general_intro, event_met, borderline or small revenue\\n- 'warn' = lowest tier or missing: no_fit, problem_match, will_find, none, neither, curiosity, cold, out_of_band revenue, or score is 0\\n\\nRules for selecting the 3 reasons:\\n- Reason 1: highest scoring attribute\\n- Reason 2: lowest scoring attribute (or the one with the most significant penalty impact)\\n- Reason 3: most decision-relevant attribute for the rep \u2014 the one that most changes what they should do next\\n- Write the text in plain English, one sentence, specific to the actual signal values\\n- Never say 'the lead' \u2014 refer to the company name or sender name\\n- Never use vague language like 'some information was provided'\\n- Be specific \u2014 mention the actual signal value in the text\\n- If a penalty fired, explain it in the relevant reason text\\n\\nExamples of good reason text:\\n- 'Northwind Partners is a management consulting firm \u2014 strong core sector fit for Acme AI'\\n- 'The CFO confirmed board mandate and CFO-approved budget of $400K \u2014 named executive sponsor'\\n- 'No budget or timeline provided \u2014 initiative has not been socialised internally yet, firing a -15 penalty'\\n- 'Referred by Michael Chen, an existing Acme AI client \u2014 trusted introduction'\\n- 'Revenue of $150M AUD confirmed \u2014 within the $20M-$300M target band'\\n- 'No internal owner identified and no plan to find one \u2014 -20 penalty applied on top of 0 exec sponsor score'\\n\\nLead data:\\nCompany: {{$json.company_name}}\\nSender: {{$json.sender_name}}\\nScore: {{$json.score}}\\nRaw score before penalties: {{$json.raw_score}}\\nPenalty total: {{$json.penalty_total}}\\nTier: {{$json.tier}}\\nTP flags: {{$json.tp_flags}}\\n\\nAttribute scores (earned points):\\n{{$json.attribute_scores}}\\n\\nSignals:\\nSector fit: {{$json.sector_fit_signal}}\\nSector fit confidence: {{$json.sector_fit_confidence}}\\nRevenue AUD: {{$json.stated_revenue_aud}}\\nExec sponsor: {{$json.exec_sponsor_signal}}\\nAI appetite: {{$json.ai_appetite_signal}}\\nBudget + timeline: {{$json.budget_timeline_signal}}\\nRelationship: {{$json.relationship_signal}}\\nBudget detail: {{$json.budget_signal}}\\nTimeline detail: {{$json.timeline_signal}}\"\n    }\n  ],\n  \"temperature\": 0.3,\n  \"max_tokens\": 500,\n  \"seed\": 0,\n  \"top_p\": 1\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        2720,
+        96
+      ],
+      "id": "ca0ed706-a96d-4a77-a4db-8d2415527bdc",
+      "name": "LLM Generate Reasons",
+      "notes": "Calls Cerebras LLM to generate exactly 3 top reasons explaining the lead's score. Uses the ICP attribute weights and the Supabase-computed attribute_scores to identify the most impactful factors. Each reason includes: attribute name, earned/max scores, pass/partial/warn icon, and a short explanation under 12 words. Supports all three paths (K, Consumer, Retail) with different attribute sets."
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst prev = $node['Read Scored Row from Supabase'].json;\n\nconst ATTRIBUTE_MAX = {\n  // K mode\n  sector_fit: 20,\n  revenue: 20,\n  exec_sponsor: 20,\n  ai_appetite: 15,\n  budget_timeline: 15,\n  relationship: 10,\n  // D-consumer\n  purchase_intent: 25,\n  location: 20,\n  product_fit: 20,\n  source_channel: 15,\n  buyer_urgency: 10,\n  lead_completeness: 10,\n  // D-retail\n  wholesale_intent: 25,\n  business_legitimacy: 20,\n  order_volume: 20,\n  product_range: 15,\n};\n\nfunction parseAttrScores(v) {\n  if (!v) return {};\n  if (typeof v === 'object') return v;\n  try { return JSON.parse(v); } catch { return {}; }\n}\n\nfunction cleanRaw(value) {\n  if (typeof value !== 'string') return '';\n  return value\n    .trim()\n    .replace(/^```json\\s*/i, '')\n    .replace(/^```\\s*/i, '')\n    .replace(/^json\\s*/i, '')\n    .replace(/\\s*```$/, '');\n}\n\nfunction normalizeIcon(earned, max) {\n  if (!max || max <= 0) return 'warn';\n  const ratio = earned / max;\n  if (ratio >= 0.7) return 'pass';\n  if (ratio >= 0.3) return 'partial';\n  return 'warn';\n}\n\nfunction buildText(name, earned, max) {\n  const pct = max > 0 ? Math.round((earned / max) * 100) : 0;\n  if (earned === 0) return `${name} missing critical signal`;\n  if (pct >= 70) return `${name} strongly supports qualification`;\n  if (pct >= 30) return `${name} partially supports qualification`;\n  return `${name} remains a weak signal`;\n}\n\nfunction canonicalAttributeName(name) {\n  const value = String(name || '').trim();\n  if (value === 'revenue_band') return 'revenue';\n  return value;\n}\n\nfunction resolveMax(attribute, explicitMax) {\n  const normalized = canonicalAttributeName(attribute);\n  return Number(explicitMax ?? 0) || ATTRIBUTE_MAX[normalized] || 0;\n}\n\nfunction extractAttributeList(attributeScores) {\n  if (!attributeScores) return [];\n\n  const raw = typeof attributeScores === 'string'\n    ? (() => { try { return JSON.parse(attributeScores); } catch { return null; } })()\n    : attributeScores;\n\n  if (Array.isArray(raw)) {\n    return raw\n      .map((item, index) => {\n        const attribute = canonicalAttributeName(item.attribute ?? item.name ?? `attribute_${index + 1}`);\n        return {\n          attribute,\n          earned: Number(item.earned ?? item.score ?? item.value ?? 0),\n          max: resolveMax(attribute, item.max ?? item.weight ?? item.max_score)\n        };\n      })\n      .filter(item => ATTRIBUTE_MAX[item.attribute]);\n  }\n\n  if (raw && typeof raw === 'object') {\n    return Object.entries(raw)\n      .map(([attribute, value]) => {\n        const normalized = canonicalAttributeName(attribute);\n        if (!ATTRIBUTE_MAX[normalized]) return null;\n        if (value && typeof value === 'object') {\n          return {\n            attribute: normalized,\n            earned: Number(value.earned ?? value.score ?? value.value ?? 0),\n            max: resolveMax(normalized, value.max ?? value.max_score ?? value.weight)\n          };\n        }\n        return {\n          attribute: normalized,\n          earned: Number(value ?? 0),\n          max: resolveMax(normalized)\n        };\n      })\n      .filter(Boolean);\n  }\n\n  return [];\n}\n\nfunction fallbackReasons(attributeScores) {\n  const list = extractAttributeList(attributeScores);\n  if (!list.length) {\n    return [\n      { attribute: 'score', earned: Number(prev.score ?? 0), max: 100, icon: 'partial', text: 'Scoring completed in Supabase' },\n      { attribute: 'confidence', earned: 0, max: 0, icon: 'partial', text: `Confidence ${prev.confidence_level ?? 'unknown'}` },\n      { attribute: 'tier', earned: 0, max: 0, icon: 'partial', text: `Tier ${prev.tier ?? 'unassigned'}` }\n    ];\n  }\n\n  const mustInclude = list.filter(item => item.max >= 15 && item.earned === 0);\n  const ordered = [...list].sort((a, b) => b.earned - a.earned || b.max - a.max);\n  const selected = [];\n\n  for (const item of mustInclude) {\n    if (!selected.find(entry => entry.attribute === item.attribute)) selected.push(item);\n  }\n\n  for (const item of ordered) {\n    if (selected.length >= 3) break;\n    if (!selected.find(entry => entry.attribute === item.attribute)) selected.push(item);\n  }\n\n  return selected.slice(0, 3).map(item => ({\n    attribute: item.attribute,\n    earned: item.earned,\n    max: item.max,\n    icon: normalizeIcon(item.earned, item.max),\n    text: buildText(item.attribute, item.earned, item.max)\n  }));\n}\n\nlet raw = cleanRaw(\n  response.choices?.[0]?.message?.content ??\n  response.data?.choices?.[0]?.message?.content ??\n  response.body?.choices?.[0]?.message?.content ??\n  ''\n);\n\nconsole.log('CLEANED RAW:', JSON.stringify(raw));\n\nconst attrScores = parseAttrScores(prev.attribute_scores);\n\nlet reasons = null;\nlet reasonsSource = 'fallback';\n\nif (raw) {\n  try {\n    const match = raw.match(/\\[[\\s\\S]*\\]/);\nif (!match) throw new Error('No JSON array found');\nconst parsed = JSON.parse(match[0]);\n    console.log('PARSED OK, length:', parsed.length);\n    if (Array.isArray(parsed) && parsed.length === 3) {\n      reasons = parsed.map((item, index) => {\n        const attribute = canonicalAttributeName(\n          item.attribute ?? `attribute_${index + 1}`\n        );\n        const earned = Number(item.earned ?? attrScores[attribute] ?? 0);\n        const max = resolveMax(attribute, item.max);\n        return {\n          attribute,\n          earned,\n          max,\n          icon: ['pass', 'partial', 'warn'].includes(item.icon)\n            ? item.icon\n            : normalizeIcon(earned, max),\n          text: String(item.text ?? buildText(attribute, earned, max))\n        };\n      });\n\n      if (reasons.length === 3) {\n        reasonsSource = 'llm';\n      } else {\n        reasons = null;\n      }\n    }\n  } catch(e) {\n    console.log('PARSE ERROR:', e.message);\n    console.log('RAW THAT FAILED:', raw.substring(0, 200));\n    reasons = null;\n  }\n}\n\nconsole.log('REASONS SOURCE:', reasonsSource);\n\nif (!reasons) {\n  reasons = fallbackReasons(prev.attribute_scores);\n}\n\nreturn [{\n  json: {\n    ...prev,\n    top_reasons: reasons,\n    top_reasons_source: reasonsSource\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2944,
+        240
+      ],
+      "id": "7537de08-3015-40c9-86e8-7b76251ef0ac",
+      "name": "Parse Reasons",
+      "notes": "Parses the LLM-generated top_reasons response. Validates it's a 3-item JSON array with correct structure. If the LLM output is malformed, falls back to a deterministic reason generator that uses the attribute_scores directly \u2014 picks the 3 highest-scoring attributes and any zero-score attributes with max >= 15. Merges reasons with the full lead record from the scored row."
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "crm_leads",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": "={{$json.id}}"
+            }
+          ]
+        },
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "top_reasons",
+              "fieldValue": "={{JSON.stringify($json.top_reasons)}}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        3168,
+        320
+      ],
+      "id": "7ed5c1c2-e482-4ff2-9a3f-3fb33088a8ac",
+      "name": "Update Reasons in Supabase",
+      "credentials": {
+        "supabaseApi": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Supabase (set your own)"
+        }
+      },
+      "notes": "Writes the LLM-generated (or fallback) top_reasons JSON array back to the crm_leads record. This is the only field updated after the initial insert \u2014 all scoring fields (score, tier, attribute_scores, etc.) were set by the database trigger and remain untouched."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://YOUR_TWENTY_HOST/rest/tasks",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.TWENTY_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{$json.twenty_body}}",
+        "options": {
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        3840,
+        320
+      ],
+      "id": "00c07994-5c10-439f-a7b1-df7f591488c1",
+      "name": "Create Twenty Task",
+      "notes": "Creates a task in Twenty CRM (YOUR_TWENTY_HOST) via REST API. Sends the pre-built JSON body containing: title with lead_id for sync matching, markdown note with full score breakdown, and all custom field values (senderName, senderEmail, companyName, leadScore, leadConfidence, recommendation, budgetSignal, timelineSignal, teamSize, urgency, useCase, reviewerNote). Uses allowUnauthorizedCerts for SSL."
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\n\nlet reasons = item.top_reasons;\nif (typeof reasons === 'string') {\n  try { reasons = JSON.parse(reasons); } catch(e) { reasons = []; }\n}\nreasons = Array.isArray(reasons) ? reasons : [];\n\nreturn [{\n  json: {\n    ...item,\n    top_reasons: reasons\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3616,
+        320
+      ],
+      "id": "90a1b0c2-eeea-4ac4-8215-459c08614d92",
+      "name": "Parse Top Reasons",
+      "notes": "Ensures top_reasons is a parsed array (not a JSON string) before passing to the task creation node. If top_reasons was stored as a string in Supabase, it parses it back into an array. Passes through all other lead fields unchanged."
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\n\nlet reasons = item.top_reasons;\nif (typeof reasons === 'string') {\n  try { reasons = JSON.parse(reasons); } catch(e) { reasons = []; }\n}\nreasons = Array.isArray(reasons) ? reasons : [];\n\nconst icon = (i) => i === 'pass' ? '\u2705' : i === 'partial' ? '\ud83d\udd36' : '\u26a0\ufe0f';\nconst r0 = reasons[0] || {};\nconst r1 = reasons[1] || {};\nconst r2 = reasons[2] || {};\n\nconst flags = Array.isArray(item.tp_flags) \n  ? item.tp_flags.join(', ') \n  : JSON.stringify(item.tp_flags || []);\n\nconst attrs = item.attribute_scores || {};\nconst attrLines = Object.entries(attrs)\n  .map(([k, v]) => `${k}: ${v}`)\n  .join('\\n');\n\nconst path = item.path || 'k';\nconst pathLabel = path === 'k' ? 'K' : path === 'consumer' ? 'Consumer' : 'Retail';\n\nconst title = `[${pathLabel}] ${item.sender_name} | Score: ${item.score} | ${item.sender_email} | lead_id:${item.id}`;\n\nconst markdown = [\n  `**Score:** ${item.score} / 100 | **Tier:** ${item.tier} | **Confidence:** ${item.confidence_level}`,\n  '',\n  '**Top Reasons:**',\n  `${icon(r0.icon)} ${r0.attribute || ''} \u2014 ${r0.text || ''}`,\n  `${icon(r1.icon)} ${r1.attribute || ''} \u2014 ${r1.text || ''}`,\n  `${icon(r2.icon)} ${r2.attribute || ''} \u2014 ${r2.text || ''}`,\n  '',\n  '**Attribute Scores:**',\n  attrLines,\n  '',\n  `**TP Flags:** ${flags}`\n].join('\\n');\n\n// Sanitize all strings for JSON safety (escape newlines, quotes, control chars)\nfunction safe(val) {\n  if (val === null || val === undefined) return '';\n  const s = String(val);\n  return s.replace(/\\\\/g, '\\\\\\\\').replace(/\"/g, '\\\\\"').replace(/\\n/g, '\\\\n').replace(/\\r/g, '\\\\r').replace(/\\t/g, '\\\\t');\n}\n\n// Build the complete JSON body as a string so it's always valid\nconst bodyObj = {\n  title: title + '',\n  bodyV2: { markdown: markdown },\n  senderName: item.sender_name || '',\n  senderEmail: item.sender_email || '',\n  companyName: item.company_name || '',\n  useCase: item.use_case || '',\n  budgetSignal: item.budget_signal || '',\n  timelineSignal: item.timeline_signal || '',\n  teamSize: String(item.team_size || ''),\n  urgency: item.urgency_level || item.urgency || '',\n  leadScore: String(item.score ?? ''),\n  leadConfidence: item.confidence_level || '',\n  recommendation: item.recommended_action || '',\n  reviewerNote: '',\n};\n\nreturn [{\n  json: {\n    ...item,\n    twenty_body: JSON.stringify(bodyObj),\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3392,
+        320
+      ],
+      "id": "002b2640-9d71-43dd-aff5-e8ea599c13a7",
+      "name": "Code in JavaScript",
+      "notes": "Builds the Twenty task payload. Formats the title with path label, sender name, score, email, and lead_id. Constructs the markdown note body with score summary, top reasons with icons, attribute score breakdown, and TP flags. Maps all lead fields to Twenty custom field names (senderName, leadScore, etc.). Pre-builds the entire JSON body using JSON.stringify() to prevent control character issues in the HTTP Request node."
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\n\n// Parse GraphQL response for task object\nconst edges = response.data?.objects?.edges || [];\nlet taskObjectId = null;\nfor (const edge of edges) {\n  const obj = edge.node || edge;\n  if (obj.nameSingular === 'task') {\n    taskObjectId = obj.id;\n    break;\n  }\n}\n\nif (!taskObjectId) {\n  return [{ json: { error: 'Task object not found', response: JSON.stringify(response).substring(0, 500) } }];\n}\n\nconst textFields = [\n  'senderName', 'senderEmail', 'companyName', 'useCase',\n  'budgetSignal', 'timelineSignal', 'teamSize', 'urgency',\n  'leadScore', 'leadConfidence', 'recommendation', 'reviewerNote',\n];\n\n// Output each field as a GraphQL mutation\nconst items = textFields.map(name => ({\n  json: {\n    query: `mutation { createOneField(input: { field: { name: \"${name}\", label: \"${name.replace(/([A-Z])/g, ' $1').trim()}\", type: TEXT, objectMetadataId: \"${taskObjectId}\" } }) { id name } }`\n  }\n}));\n\n// Add reviewDecision SELECT\nitems.push({\n  json: {\n    query: `mutation { createOneField(input: { field: { name: \"reviewDecision\", label: \"Review Decision\", type: SELECT, objectMetadataId: \"${taskObjectId}\", defaultValue: \"'PENDING'\", options: [{ label: \"Pending\", value: \"PENDING\", color: \"gray\", position: 0 }, { label: \"Approved\", value: \"APPROVED\", color: \"green\", position: 1 }, { label: \"Rejected\", value: \"REJECTED\", color: \"red\", position: 2 }, { label: \"Overridden\", value: \"OVERRIDDEN\", color: \"yellow\", position: 3 }] } }) { id name } }`\n  }\n});\n\nreturn items;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2208,
+        784
+      ],
+      "id": "0a1ef376-b085-48f6-9ea0-7e29ddc96a7d",
+      "name": "Prepare Field List",
+      "notes": "One-time setup node. Takes the Task object ID from the metadata query and generates a list of GraphQL mutations to create each custom field (12 TEXT fields + 1 SELECT field for reviewDecision). Each item in the output becomes a separate API call in the Create Twenty Field node. Part of the setup flow triggered by 'Run Setup Once'."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_TWENTY_HOST/metadata",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.TWENTY_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"query\": \"{ objects(paging: { first: 100 }) { edges { node { id nameSingular } } } }\"}",
+        "options": {
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -2432,
+        784
+      ],
+      "id": "c8ddc097-85a8-4b12-b79e-76f29ca6fce8",
+      "name": "Get Task Object ID",
+      "notes": "One-time setup node. Queries Twenty's GraphQL metadata API to find the internal object ID for the Task object. This ID is required to create custom fields on Tasks. Uses POST to /metadata with a GraphQL query. Part of the setup flow triggered by 'Run Setup Once'."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_TWENTY_HOST/metadata",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.TWENTY_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ query: $json.query }) }}",
+        "options": {
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -1984,
+        784
+      ],
+      "id": "f18e70c7-0d19-4a53-9498-3b2982310cbd",
+      "name": "Create Twenty Field",
+      "notes": "One-time setup node. Executes each GraphQL createOneField mutation to add custom fields to the Twenty Task object. Runs once per field from the Prepare Field List output. 400 errors mean the field already exists (safe to ignore). Uses allowUnauthorizedCerts for SSL. Part of the setup flow triggered by 'Run Setup Once'."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.GROQ_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"stream\": false,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Detect the language of the email body below and translate it to English if it is not already in English.\\n\\nReturn ONLY valid JSON with this exact structure:\\n{\\n  \\\"detected_language\\\": \\\"\\\",\\n  \\\"is_english\\\": false,\\n  \\\"original_body\\\": \\\"\\\",\\n  \\\"translated_body\\\": \\\"\\\"\\n}\\n\\n- detected_language: the ISO 639-1 language code of the original text. Examples: 'en', 'fr', 'it', 'vi'. Empty string if cannot be determined.\\n- is_english: true if the original text is in English. false otherwise.\\n- original_body: the original email body exactly as provided. Do not modify it.\\n- translated_body: if is_english is true, copy the original body here unchanged. If is_english is false, provide a full accurate English translation of the original body.\\n\\nGENERAL RULES:\\n- Return only the JSON object. No markdown. No explanations.\\n- Preserve all names, company names, numbers, and email addresses exactly as they appear.\\n- Do not summarise \u2014 translate the full body.\\n\\nCITY NAME RULES (apply to translated_body only):\\n- Always translate city names to their standard English form.\\n- Use these exact values: 'H\u00f4 Chi Minh-Ville' OR 'Ho Chi Minh' OR 'Saigon' OR 'TP HCM' OR 'HCMC' \u2192 write as 'Ho Chi Minh City'\\n- 'H\u00e0 N\u1ed9i' OR 'Ha Noi' \u2192 write as 'Hanoi'\\n- '\u0110\u00e0 N\u1eb5ng' \u2192 write as 'Da Nang'\\n- 'C\u1ea7n Th\u01a1' \u2192 write as 'Can Tho'\\n- Never use accented or French versions of city names in translated_body.\\n\\nEmail body: {{$json.body}}\"\n    }\n  ],\n  \"temperature\": 0,\n  \"max_tokens\": 800,\n  \"seed\": 0,\n  \"top_p\": 1\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -1536,
+        272
+      ],
+      "id": "8b255920-5e21-4b84-989f-48805801c0b0",
+      "name": "Translation Node"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nlet raw = item.choices?.[0]?.message?.content ?? '';\nif (typeof raw !== 'string') { return [{ json: { parse_error: true, raw_output: raw } }]; }\nraw = raw.trim().replace(/^```json\\s*/i, '').replace(/^```\\s*/i, '').replace(/\\s*```$/, '');\nlet parsed;\ntry { parsed = JSON.parse(raw); }\ncatch (e) { return [{ json: { parse_error: true, raw_output: raw } }]; }\n\nconst emailData = $('Extract Email Fields').first()?.json || {};\n\nreturn [{ json: {\n  // pass everything from original email through\n  subject:            emailData.subject     || '',\n  from_name:          emailData.from_name   || '',\n  from_email:         emailData.from_email  || '',\n  from_phone:         emailData.from_phone  || '',\n  received_at:        emailData.received_at || '',\n  // language fields\n  detected_language:  parsed.detected_language  || 'en',\n  is_english:         parsed.is_english          ?? true,\n  original_body:      parsed.original_body       || emailData.body || '',\n  body:               parsed.translated_body     || emailData.body || '',\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1312,
+        272
+      ],
+      "id": "bf55e3cf-241d-4fca-be34-4865a6018a2f",
+      "name": "Parse Original Body"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "cc069b29-6acb-400f-8ad3-c1f654cb9e8d",
+              "leftValue": "={{$json.is_spam}}",
+              "rightValue": "false",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -416,
+        272
+      ],
+      "id": "7fb44011-da22-475a-a985-5537f7acf18f",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "jsCode": "const subject = ($input.first().json.subject || '').toLowerCase();\nconst body = ($input.first().json.body || '').toLowerCase();\nconst email = ($input.first().json.from_email || '').toLowerCase();\n\nconst spamSignals = [\n  email.includes('noreply'),\n  email.includes('no-reply'),\n  email.includes('mailer-daemon'),\n  email.includes('donotreply'),\n  body.includes('unsubscribe'),\n  body.includes('click here to win'),\n  body.includes('you have been selected'),\n  body.includes('congratulations you won'),\n  body.includes('free gift'),\n  body.includes('limited time offer'),\n  body.includes('act now'),\n  body.length < 15,\n  subject.includes('re: re: re:'),\n];\n\nconst spamScore = spamSignals.filter(Boolean).length;\nconst is_spam = spamScore >= 2;\n\nreturn [{ json: {\n  ...$input.first().json,\n  is_spam,\n  spam_score: spamScore\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1088,
+        272
+      ],
+      "id": "ec851b87-abf6-4913-a663-277f7610057c",
+      "name": "Spam Check"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{$json.path}}",
+                    "rightValue": "k",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "f47808a8-2582-4cf8-9139-7bc0aebef86a"
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "0704a664-515a-499c-8843-3caa048fc752",
+                    "leftValue": "={{$json.path}}",
+                    "rightValue": "consumer",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "29d9b073-513e-458c-9d30-ca197a23b297",
+                    "leftValue": "={{$json.path}}",
+                    "rightValue": "retail",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        2496,
+        256
+      ],
+      "id": "db1d1730-1116-4958-af7c-efa8aefe8870",
+      "name": "Switch"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.GROQ_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"stream\": false,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"You are a CRM analyst for Lumen Living, a luxury Vietnamese furniture brand.\\n\\nA consumer lead has been scored. Generate exactly 3 top reasons explaining the score based on the attribute scores and signals below.\\n\\nReturn ONLY valid JSON array with this exact structure:\\n[\\n  {\\n    \\\"attribute\\\": \\\"\\\",\\n    \\\"icon\\\": \\\"\\\",\\n    \\\"text\\\": \\\"\\\"\\n  }\\n]\\n\\nAttribute max scores for Consumer mode:\\n- purchase_intent: max 25\\n- location: max 20\\n- product_fit: max 20\\n- source_channel: max 15\\n- buyer_urgency: max 10\\n- lead_completeness: max 10\\n\\nIcon values:\\n- 'pass' = attribute scored 70% or more of its max\\n- 'partial' = attribute scored 30-69% of its max\\n- 'warn' = attribute scored less than 30% of its max\\n\\nRules for selecting the 3 reasons:\\n- Always include the highest scoring attribute as reason 1\\n- Always include the lowest scoring attribute as reason 2\\n- Pick the most interesting or decision-relevant attribute as reason 3\\n- Write the text in plain English, one sentence, specific to the actual signal values\\n- Never say 'the lead' \u2014 refer to the sender name\\n- NEVER use vague language like 'partially supports qualification' or 'strongly supports qualification'\\n- NEVER just repeat the attribute name \u2014 always say something specific about this person\\n- Always mention the actual location, product, channel, or contact detail in the text\\n\\nExamples of good reason text:\\n- 'Located in District 3, Ho Chi Minh City \u2014 within local delivery zone'\\n- 'Clicked through from a Facebook ad \u2014 high intent paid channel'\\n- 'Asking about price and availability of the Oslo dining set \u2014 direct purchase intent'\\n- 'Name only provided \u2014 no email or phone number in message'\\n- 'Enquiry came via Instagram organic \u2014 lower conversion channel'\\n- 'Wants to buy as soon as possible \u2014 immediate urgency signal'\\n- 'Full contact details provided \u2014 name, email and phone all present'\\n- 'Based in Hanoi \u2014 domestic delivery zone, outside HCMC local area'\\n\\nExamples of bad reason text (NEVER write like this):\\n- 'purchase_intent partially supports qualification'\\n- 'location strongly supports qualification'\\n- 'product_fit indicates partial match'\\n\\nLead data:\\nSender: {{$json.sender_name}}\\nScore: {{$json.score}}\\nTier: {{$json.tier}}\\nAttribute scores: {{$json.attribute_scores}}\\nPurchase intent signal: {{$json.purchase_intent_signal}}\\nLocation signal: {{$json.location_signal}}\\nExtracted city: {{$json.extracted_city}}\\nExtracted district: {{$json.extracted_district}}\\nProduct fit signal: {{$json.product_fit_signal}}\\nProduct requested: {{$json.product_requested}}\\nSource channel signal: {{$json.source_channel_signal}}\\nBuyer urgency signal: {{$json.buyer_urgency_signal}}\\nContact completeness: {{$json.contact_completeness_signal}}\\nPrice shopping: {{$json.price_shopping}}\\nPenalties: {{$json.penalty_total}}\\nTP flags: {{$json.tp_flags}}\"\n    }\n  ],\n  \"temperature\": 0.3,\n  \"max_tokens\": 400,\n  \"seed\": 0,\n  \"top_p\": 1\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        2720,
+        288
+      ],
+      "id": "4e30bc35-49da-4a0f-a9be-5e6f879a11d1",
+      "name": "LLM Generate Reasons Consumer",
+      "notes": "Calls Cerebras LLM to generate exactly 3 top reasons explaining the lead's score. Uses the ICP attribute weights and the Supabase-computed attribute_scores to identify the most impactful factors. Each reason includes: attribute name, earned/max scores, pass/partial/warn icon, and a short explanation under 12 words. Supports all three paths (K, Consumer, Retail) with different attribute sets."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.GROQ_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"stream\": false,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"You are a CRM analyst for Lumen Living, a luxury Vietnamese furniture brand.\\n\\nA retail wholesale lead has been scored. Generate exactly 3 top reasons explaining the score based on the attribute scores and signals below.\\n\\nReturn ONLY valid JSON array with this exact structure:\\n[\\n  {\\n    \\\"attribute\\\": \\\"\\\",\\n    \\\"icon\\\": \\\"\\\",\\n    \\\"text\\\": \\\"\\\"\\n  }\\n]\\n\\nAttribute max scores for Retail mode:\\n- wholesale_intent: max 25\\n- business_legitimacy: max 20\\n- order_volume: max 20\\n- product_range: max 15\\n- location: max 10\\n- relationship: max 10\\n\\nIcon values:\\n- 'pass' = attribute scored 70% or more of its max\\n- 'partial' = attribute scored 30-69% of its max\\n- 'warn' = attribute scored less than 30% of its max\\n\\nRules for selecting the 3 reasons:\\n- Always include the highest scoring attribute as reason 1\\n- Always include the lowest scoring attribute as reason 2\\n- Pick the most interesting or decision-relevant attribute as reason 3\\n- Write the text in plain English, one sentence, specific to the actual signal values\\n- Never say 'the lead'\\n- If company name is provided use it. If company name is empty or null use the sender name only\\n- NEVER invent or assume a company name \u2014 only use what is explicitly provided in the lead data below\\n- Never use vague language like 'some information was provided'\\n- Never mention internal signal names like trade_terms or full_identity \u2014 translate to plain English\\n- Never mention details not present in the lead data\\n- No notes or explanations after the JSON array\\n\\nWholesale intent signal meanings:\\n- trade_terms = explicitly asked for wholesale pricing, MOQ, trade account or margin structure\\n- moq_volume = asked about order quantities or volume discounts\\n- interest_stated = expressed interest in stocking products but has not yet asked about terms\\n- range_inquiry = only asked about product catalogue or range\\n- retail_price_only = consumer level inquiry, no wholesale intent\\n\\nBusiness legitimacy signal meanings:\\n- full_identity = business name + address + contact all verified\\n- name_address_only = business name and address provided but incomplete contact\\n- name_only = only business name provided\\n- unverified_claim = claims to be a retailer but no business name or address provided\\n- none = no business identity at all\\n\\nOrder volume signal meanings:\\n- chain_high_volume = multiple store locations or 50+ units\\n- active_independent = single established store with commercial intent\\n- small_independent = very small or just starting out\\n- none = no volume information provided\\n\\nExamples of good reason text:\\n- 'Explicitly requested trade pricing and MOQ terms \u2014 strong wholesale intent'\\n- 'Business name, address and contact all verified \u2014 full identity confirmed'\\n- 'Chain of 12 stores across Ho Chi Minh City \u2014 high volume wholesale potential'\\n- 'Store sells electronics and food \u2014 no product overlap with Lumen Living furniture range'\\n- 'Referred by an existing Lumen Living retail partner \u2014 warm introduction'\\n- 'Located in Ho Chi Minh City District 1 \u2014 within local delivery zone'\\n- 'Expressed interest in stocking products but has not yet requested trade terms'\\n- 'Only personal name and address provided \u2014 no store name or business registration'\\n- 'Single independent store with active commercial buying intent'\\n\\nLead data:\\nCompany: {{$json.company_name}}\\nSender: {{$json.sender_name}}\\nScore: {{$json.score}}\\nTier: {{$json.tier}}\\nAttribute scores: {{$json.attribute_scores}}\\nWholesale intent signal: {{$json.wholesale_intent_signal}}\\nBusiness legitimacy signal: {{$json.business_legitimacy_signal}}\\nOrder volume signal: {{$json.order_volume_signal}}\\nProduct range signal: {{$json.product_range_signal}}\\nLocation signal: {{$json.location_signal}}\\nRelationship signal: {{$json.relationship_source_signal}}\\nStore count: {{$json.store_count}}\\nPenalties: {{$json.penalty_total}}\\nTP flags: {{$json.tp_flags}}\"\n    }\n  ],\n  \"temperature\": 0.3,\n  \"max_tokens\": 400,\n  \"seed\": 0,\n  \"top_p\": 1\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        2720,
+        480
+      ],
+      "id": "5038edea-9bfb-4e89-8db5-c9b963cd8a74",
+      "name": "LLM Generate Reasons Retail",
+      "notes": "Calls Cerebras LLM to generate exactly 3 top reasons explaining the lead's score. Uses the ICP attribute weights and the Supabase-computed attribute_scores to identify the most impactful factors. Each reason includes: attribute name, earned/max scores, pass/partial/warn icon, and a short explanation under 12 words. Supports all three paths (K, Consumer, Retail) with different attribute sets."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "8a6c0705-a062-4250-984e-466d1831e633",
+              "leftValue": "={{$('Read Scored Row from Supabase').first().json.score}}",
+              "rightValue": 50,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            },
+            {
+              "id": "911a8b8b-98af-4407-a1f1-37f4c2a4a485",
+              "leftValue": "={{$('Read Scored Row from Supabase').first().json.path}}",
+              "rightValue": "k",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2944,
+        480
+      ],
+      "id": "d130740c-a2cf-4661-a84e-7525c7ed8770",
+      "name": "If1"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Use rewritten query if available (reply path only)\nlet rewrittenQuery = null;\ntry {\n  rewrittenQuery = $('Rewrite Query').first()?.json?.rewrittenQuery || null;\n} catch(e) {\n  rewrittenQuery = null;\n}\n\n// Try input first (reply path), fall back to Read Scored Row (normal path)\nconst inputData = $input.first().json;\nconst leadData = inputData?.leadData || \n                 $('Read Scored Row from Supabase').first()?.json || \n                 inputData || \n                 {};\n\nconst subject = (leadData.subject || leadData.email_subject || '').toLowerCase();\n\n// FIX: use translated_body as primary, email_body as fallback\nconst bodyText = (leadData.translated_body || \n                  leadData.email_body || \n                  leadData.original_body || '').toLowerCase();\n\n// THIS LINE WAS MISSING \u2014 fullText combines subject + body\nconst fullText = bodyText; // use translated body only, skip French subject\n\n\n\n\n\n// Extract product names by looking for known product keywords\nconst productTerms = [];\nif (fullText.includes('stilt')) productTerms.push('Stilt Sofa');\nif (fullText.includes('faifo') || fullText.includes('dining table')) productTerms.push('Faifo Dining Table');\nif (fullText.includes('joss')) productTerms.push('Joss Lounge Chair');\nif (fullText.includes('lola')) productTerms.push('Lola Dining Chair');\nif (fullText.includes('knot')) productTerms.push('Knot Coffee Table');\nif (fullText.includes('lodge')) productTerms.push('Lodge Bed');\nif (fullText.includes('bow')) productTerms.push('Bow Barstool');\nif (fullText.includes('inumbra')) productTerms.push('Inumbra Shelving');\nif (fullText.includes('limen')) productTerms.push('Limen Sideboard');\nif (fullText.includes('tonkin')) productTerms.push('Tonkin Side Table');\nif (fullText.includes('foosball') || fullText.includes('dinh')) productTerms.push('DINH Foosball Table');\nif (fullText.includes('chess')) productTerms.push('Chess Set');\nif (fullText.includes('buom')) productTerms.push('Buom Armchair');\nif (fullText.includes('ottoman')) productTerms.push('Joss Ottoman');\n\n// ADD THIS RIGHT HERE\nconsole.log('=== DEBUG ===');\nconsole.log('translated_body:', leadData.translated_body);\nconsole.log('email_body:', leadData.email_body);\nconsole.log('bodyText:', bodyText);\nconsole.log('fullText:', fullText.substring(0, 300));\nconsole.log('productTerms after detection:', productTerms);\nconsole.log('=============');\n\n// ADD THIS RIGHT HERE\nconsole.log('=== DEBUG ===');\nconsole.log('translated_body:', leadData.translated_body);\nconsole.log('email_body:', leadData.email_body);\nconsole.log('bodyText:', bodyText);\nconsole.log('fullText:', fullText.substring(0, 300));\nconsole.log('productTerms after detection:', productTerms);\nconsole.log('=============');\n// Build embedding query \u2014 product names + path context\nconst pathContext = leadData.path === 'retail' \n  ? 'trade pricing lead time B2B' \n  : 'retail price availability';\n\n// Use rewritten query if available, otherwise build from product terms\nconst query = rewrittenQuery || \n  (productTerms.length > 0\n    ? productTerms.join(' ') + ' ' + pathContext\n    : fullText.substring(0, 200));\n\n// Generate embedding\nconst embeddingResponse = await this.helpers.httpRequest({\n  method: 'POST',\n  url: 'https://router.huggingface.co/hf-inference/models/sentence-transformers/all-MiniLM-L6-v2/pipeline/feature-extraction',\n  headers: {\n    'Authorization': 'Bearer ' + process.env.HF_API_KEY,\n    'Content-Type': 'application/json'\n  },\n  body: { inputs: query },\n  json: true\n});\n\nconst vector = Array.isArray(embeddingResponse[0]) ? embeddingResponse[0] : embeddingResponse;\nconst vectorString = '[' + vector.join(',') + ']';\n\n// Query Supabase match_knowledge\nconst matches = await this.helpers.httpRequest({\n  method: 'POST',\n  url: 'https://YOUR_PROJECT.supabase.co/rest/v1/rpc/match_knowledge',\n  headers: {\n    'apikey': process.env.SUPABASE_KEY,\n    'Authorization': 'Bearer ' + process.env.SUPABASE_KEY,\n    'Content-Type': 'application/json'\n  },\n  body: { query_embedding: vectorString, match_count: 10 },\n  json: true\n});\n\n// Boost and rerank\nconst queryLower = query.toLowerCase();\nconst boosted = matches.map(r => {\n  let boost = 0;\n  const content = (r.content || '').toLowerCase();\n  const product = (r.product || '').toLowerCase();\n\n  // Strong boost for exact product name matches\n  if (content.includes('stilt') && queryLower.includes('stilt')) boost += 30;\n  if (content.includes('faifo') && queryLower.includes('faifo')) boost += 30;\n  if (content.includes('joss') && queryLower.includes('joss')) boost += 30;\n  if (content.includes('lola') && queryLower.includes('lola')) boost += 30;\n  if (content.includes('knot') && queryLower.includes('knot')) boost += 30;\n  if (content.includes('lodge') && queryLower.includes('lodge')) boost += 30;\n  if (content.includes('bow') && queryLower.includes('bow')) boost += 30;\n  if (content.includes('limen') && queryLower.includes('limen')) boost += 30;\n  if (content.includes('inumbra') && queryLower.includes('inumbra')) boost += 30;\n  if (content.includes('ottoman') && queryLower.includes('ottoman')) boost += 30;\n\n  // Category boosts\n  if (product.includes('sofa') && queryLower.includes('sofa')) boost += 10;\n  if (product.includes('dining') && queryLower.includes('dining')) boost += 10;\n  if (product.includes('bed') && queryLower.includes('bed')) boost += 10;\n  if (product.includes('chair') && queryLower.includes('chair')) boost += 10;\n  if (product.includes('table') && queryLower.includes('table')) boost += 10;\n\n  // Retail path \u2014 boost B2B and pricing chunks\n  if (leadData.path === 'retail') {\n    if (content.includes('b2b') || content.includes('trade price') || content.includes('35%')) boost += 20;\n    if (content.includes('minimum order') || content.includes('moq')) boost += 15;\n    if (content.includes('lead time')) boost += 10;\n  }\n\n  // Penalise irrelevant products\n  if (queryLower.includes('sofa') && product.includes('armchair') && !queryLower.includes('armchair')) boost -= 20;\n  if (queryLower.includes('dining') && product.includes('coffee')) boost -= 10;\n\n  return { ...r, boost };\n});\n\nconst reranked = boosted.sort((a, b) => b.boost - a.boost);\nconst top4 = reranked.slice(0, 4);\n\nconst context = top4.map(r => r.content).join(' | ')\n  .replace(/\\n/g, ' ')\n  .replace(/\u2013/g, '-')\n  .replace(/\"/g, \"'\");\n\nreturn [{ json: { context, leadData, historyText: inputData?.historyText || '' } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3168,
+        -96
+      ],
+      "id": "a64545b9-9bb3-411a-a29c-c2d31484f959",
+      "name": "Find Relevant Chunks"
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json.choices?.[0]?.message?.content ?? '';\nconst leadData = $('Find Relevant Chunks').first()?.json?.leadData || {};\nreturn [{ json: { reply: raw, leadData } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3616,
+        -96
+      ],
+      "id": "907c8289-23fa-47b9-8a7c-c295cfd487bf",
+      "name": "Parse Reply"
+    },
+    {
+      "parameters": {
+        "jsCode": "const reply = $input.first().json.reply;\nconst leadData = $input.first().json.leadData;\n\n// Safely try Parse Original Body first (new lead path), fall back to leadData (reply path)\nlet detectedLanguage = 'en';\ntry {\n  detectedLanguage = $('Parse Original Body').first()?.json?.detected_language \n                  || leadData?.detected_language \n                  || 'en';\n} catch (e) {\n  detectedLanguage = leadData?.detected_language || 'en';\n}\n\nconst isEnglish = detectedLanguage === 'en';\n\nif (isEnglish === true || detectedLanguage === 'en') {\n  return [{ json: { reply, leadData } }];\n}\n\nconst langMap = {\n  'fr': 'French',\n  'it': 'Italian', \n  'vi': 'Vietnamese',\n  'de': 'German',\n  'es': 'Spanish',\n  'zh': 'Chinese',\n  'ja': 'Japanese',\n  'ko': 'Korean'\n};\n\nconst targetLanguage = langMap[detectedLanguage] || detectedLanguage;\n\nconst response = await this.helpers.httpRequest({\n  method: 'POST',\n  url: 'https://api.groq.com/openai/v1/chat/completions',\n  headers: {\n    'Authorization': 'Bearer ' + process.env.GROQ_API_KEY,\n    'Content-Type': 'application/json'\n  },\n  body: {\n    model: 'llama-3.3-70b-versatile',\n    temperature: 0,\n    max_tokens: 600,\n    messages: [{\n      role: 'user',\n      content: `Translate the following email reply into ${targetLanguage}. Keep the same professional tone, formatting, and meaning. Return ONLY the translated text, nothing else.\\n\\n${reply}`\n    }]\n  },\n  json: true\n});\n\nconst translatedReply = response.choices[0].message.content;\nreturn [{ json: { reply: translatedReply, leadData } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3840,
+        -96
+      ],
+      "id": "37382752-f4c8-40d9-a597-676351f0d292",
+      "name": "Translation reply"
+    },
+    {
+      "parameters": {
+        "operation": "reply",
+        "messageId": "={{$('Lumen Living Gmail Trigger').first().json.id}}",
+        "emailType": "text",
+        "message": "={{$('Translation reply').first().json.reply}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        4736,
+        -96
+      ],
+      "id": "05ede746-b42f-411b-b969-348c45aa0c57",
+      "name": "Reply to a message",
+      "webhookId": "14c08e35-004c-4007-8a64-224d2e2b9ab1",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Inbox Gmail (set your own)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.GROQ_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"stream\": false,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"You are a spam detection system for Acme AI, an Australian B2B AI consulting firm. Acme AI also handles Lumen Living furniture enquiries.\\n\\nAnalyse the email below and determine if it is spam or a legitimate business enquiry.\\n\\nLEGITIMATE emails include:\\n- Businesses enquiring about AI consulting, CRM, or data services\\n- Individuals asking about furniture products, pricing, or delivery\\n- Interior designers or retailers asking about trade pricing\\n- Any genuine business or personal enquiry related to Acme AI or Lumen Living\\n- Referrals or introductions from known contacts\\n\\nSPAM emails include:\\n- Mass marketing or promotional emails\\n- Phishing or credential harvesting attempts\\n- Automated newsletter or subscription emails\\n- Fake prize, lottery, or reward notifications\\n- Generic outreach with no specific ask related to Acme AI or Lumen Living\\n- Link farming or SEO spam\\n- Emails clearly not addressed to Acme AI or Lumen Living\\n- Job recruitment spam or irrelevant cold outreach\\n- Emails with no identifiable sender name or company\\n\\nReturn ONLY valid JSON with this exact structure:\\n{\\\"is_spam\\\": true or false, \\\"confidence\\\": 0-100, \\\"reason\\\": \\\"one sentence explanation\\\"}\\n\\nRULES:\\n- When in doubt, classify as NOT spam. False negatives are better than false positives.\\n- A confidence below 70 = not spam regardless of is_spam value.\\n- Return only the JSON object. No markdown. No explanation.\\n\\nEmail subject: {{$json.subject}}\\nSender email: {{$json.from_email}}\\nEmail body: {{$json.body}}\"\n    }\n  ],\n  \"temperature\": 0,\n  \"max_tokens\": 100,\n  \"seed\": 0,\n  \"top_p\": 1\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -864,
+        272
+      ],
+      "id": "3d6218d0-e4be-4913-b95d-2239190bcd14",
+      "name": "LLM Spam Check",
+      "notes": "Calls Cerebras LLM with the Acme AI B2B extraction prompt. Extracts structured fields from the email: sender_name, sender_email, company_name, team_size, stated_revenue_aud, sector_fit_signal, exec_sponsor_signal, ai_appetite_signal, budget_timeline_signal, relationship_signal, budget_signal, timeline_signal, price_shopping, cannot_influence_decision, fields_inferred. Uses controlled vocabulary with conservative defaults."
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json.choices?.[0]?.message?.content || '{}';\nlet parsed = {};\ntry {\n  parsed = JSON.parse(raw);\n} catch(e) {\n  parsed = { is_spam: false, confidence: 0, reason: 'parse error' };\n}\n\nconst keywordSpam = $('Spam Check').first().json.is_spam;\nconst llmSpam = parsed.is_spam === true && parsed.confidence >= 70;\nconst is_spam = keywordSpam || llmSpam;\n\nreturn [{ json: {\n  ...$('Parse Original Body').first().json,\n  is_spam,\n  spam_reason: parsed.reason || '',\n  spam_confidence: parsed.confidence || 0\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -640,
+        272
+      ],
+      "id": "0937160a-8da3-4db1-b360-bcbd3f3dcf67",
+      "name": "Code in JavaScript1"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.GROQ_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"stream\": false,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"You are checking whether specific pieces of information were explicitly stated in an email or had to be inferred.\\n\\nRead the email below and answer for each field: did the sender EXPLICITLY state this in their email, or did you have to INFER it from context?\\n\\n'stated' = the sender directly mentioned this in their own words\\n'inferred' = the sender never mentioned this \u2014 you had to guess or default\\n\\nReturn ONLY valid JSON:\\n{\\n  \\\"sector_fit_confidence\\\": \\\"\\\",\\n  \\\"exec_sponsor_confidence\\\": \\\"\\\",\\n  \\\"ai_appetite_confidence\\\": \\\"\\\",\\n  \\\"budget_timeline_confidence\\\": \\\"\\\",\\n  \\\"relationship_confidence\\\": \\\"\\\",\\n  \\\"stated_revenue_confidence\\\": \\\"\\\"\\n}\\n\\nRules per field:\\n- sector_fit_confidence: 'stated' if sender described their industry or business type. 'inferred' if you had to guess from company name or domain.\\n- exec_sponsor_confidence: 'stated' if sender mentioned anything about internal ownership, sponsors, sign-off, or explicitly said there is none. 'inferred' if internal ownership was never mentioned at all.\\n- ai_appetite_confidence: 'stated' if sender mentioned AI, data platforms, automation, or digital transformation in any way. 'inferred' if AI was never mentioned.\\n- budget_timeline_confidence: 'stated' if sender mentioned budget, timeline, or explicitly said they have neither. 'inferred' if budget and timeline were never mentioned at all.\\n- relationship_confidence: 'stated' if sender mentioned how they found or were introduced to Acme AI. 'inferred' if there is no mention of how they found Acme AI.\\n- stated_revenue_confidence: 'stated' if sender mentioned any revenue, turnover, or ARR figure. 'inferred' if revenue was never mentioned.\\n\\nOnly return 'inferred' if the topic was COMPLETELY ABSENT from the email.\\nA disqualifying signal (no budget, no sponsor, no fit) is still 'stated' if the sender mentioned it.\\n\\nEmail:\\n{{$json.original_body}}\\n\\nExtracted signals for context:\\nSector: {{$json.sector_fit_signal}}\\nExec sponsor: {{$json.exec_sponsor_signal}}\\nAI appetite: {{$json.ai_appetite_signal}}\\nBudget timeline: {{$json.budget_timeline_signal}}\\nRelationship: {{$json.relationship_signal}}\\nRevenue: {{$json.stated_revenue_aud}}\"\n    }\n  ],\n  \"temperature\": 0,\n  \"max_tokens\": 150,\n  \"seed\": 0,\n  \"top_p\": 1\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        928,
+        64
+      ],
+      "id": "b99323d2-0dc6-4d17-be1c-c226029132e1",
+      "name": "LLM Confidence Check",
+      "notes": "Calls Cerebras LLM with the Acme AI B2B extraction prompt. Extracts structured fields from the email: sender_name, sender_email, company_name, team_size, stated_revenue_aud, sector_fit_signal, exec_sponsor_signal, ai_appetite_signal, budget_timeline_signal, relationship_signal, budget_signal, timeline_signal, price_shopping, cannot_influence_decision, fields_inferred. Uses controlled vocabulary with conservative defaults."
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nlet raw = item.choices?.[0]?.message?.content ?? '';\nraw = raw.trim().replace(/^```json\\s*/i, '').replace(/^```\\s*/i, '').replace(/\\s*```$/, '');\n\nlet parsed;\ntry { parsed = JSON.parse(raw); }\ncatch(e) { parsed = {}; }\n\nconst prev = $('Parse K Fields').first().json;\n\nconst fields_inferred = [\n  parsed.sector_fit_confidence,\n  parsed.exec_sponsor_confidence,\n  parsed.ai_appetite_confidence,\n  parsed.budget_timeline_confidence,\n  parsed.relationship_confidence,\n  parsed.stated_revenue_confidence,\n].filter(v => v === 'inferred').length;\n\nreturn [{ json: {\n  ...prev,\n  sector_fit_confidence:      parsed.sector_fit_confidence      ?? 'inferred',\n  exec_sponsor_confidence:    parsed.exec_sponsor_confidence    ?? 'inferred',\n  ai_appetite_confidence:     parsed.ai_appetite_confidence     ?? 'inferred',\n  budget_timeline_confidence: parsed.budget_timeline_confidence ?? 'inferred',\n  relationship_confidence:    parsed.relationship_confidence    ?? 'inferred',\n  stated_revenue_confidence:  parsed.stated_revenue_confidence  ?? 'inferred',\n  fields_inferred\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1152,
+        64
+      ],
+      "id": "522ce716-e06a-4182-8752-806515939b95",
+      "name": "Parse Confidence"
+    },
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "simple": false,
+        "filters": {
+          "q": "-from:sales-notify@yourcompany.example"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -2432,
+        -48
+      ],
+      "id": "717a3ac6-0a68-4fc9-b2a7-e5088a98e832",
+      "name": "Lumen Living Gmail Trigger",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Inbox Gmail (set your own)"
+        }
+      },
+      "notes": "Polls inbox@yourcompany.example every 60 seconds for new incoming emails. When a new email arrives, it triggers the lead intake pipeline automatically. Requires Gmail OAuth2 credential configured with the shared Google Cloud OAuth client."
+    },
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "filters": {}
+      },
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -2432,
+        160
+      ],
+      "id": "04e88fec-cf8c-452f-aaa9-bf7b296d275a",
+      "name": "Acme AI Gmail Trigger",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Secondary Gmail (set your own)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "adbadb61-5b1a-4470-b9c8-200de7fe4f76",
+              "leftValue": "={{$json.leadData.path}}",
+              "rightValue": "consumer",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        4288,
+        -96
+      ],
+      "id": "f2b5215c-d536-4eee-9851-c66dc921e2f7",
+      "name": "If2"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "crm_leads",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": "={{$json.leadData.id}}"
+            }
+          ]
+        },
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "draft_email",
+              "fieldValue": "=={{$json.reply}}"
+            },
+            {
+              "fieldId": "auto_reply_sent",
+              "fieldValue": "true"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        4512,
+        -96
+      ],
+      "id": "6d468eff-2aec-4bea-86ee-889f5bd5a996",
+      "name": "Update a row",
+      "credentials": {
+        "supabaseApi": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Supabase (set your own)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "crm_leads",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": "={{$json.leadData.id}}"
+            }
+          ]
+        },
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "draft_email",
+              "fieldValue": "=={{$json.reply}}"
+            },
+            {
+              "fieldId": "auto_reply_sent",
+              "fieldValue": "false"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        4512,
+        96
+      ],
+      "id": "085df138-40c8-4788-b8d6-aea229c8eb76",
+      "name": "Update a row1",
+      "credentials": {
+        "supabaseApi": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Supabase (set your own)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const emailData = $input.first().json;\nconst threadId = $('Lumen Living Gmail Trigger').first().json.threadId;\n\nconst result = await this.helpers.httpRequest({\n  method: 'GET',\n  url: `https://YOUR_PROJECT.supabase.co/rest/v1/crm_leads?conversation_id=eq.${threadId}&select=id,review_status,score,sender_name,path,pricing_tier,extracted_city,detected_language,email_body&limit=1`,\n  headers: {\n    'apikey': process.env.SUPABASE_KEY,\n    'Authorization': 'Bearer ' + process.env.SUPABASE_KEY,\n    'Content-Type': 'application/json'\n  },\n  json: true\n});\n\nconst existingLead = result?.[0] || null;\n\nreturn [{ json: {\n  ...emailData,\n  threadId,\n  is_reply: existingLead !== null,\n  existing_lead_id: existingLead?.id || null,\n  existing_path: existingLead?.path || null,\n  existing_pricing_tier: existingLead?.pricing_tier || null,\n  existing_city: existingLead?.extracted_city || null,\n  existing_language: existingLead?.detected_language || null,\n  existing_review_status: existingLead?.review_status || null\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1984,
+        -48
+      ],
+      "id": "c9ab08ff-94e9-4612-9691-19986af22bf6",
+      "name": "Check Existing Thread"
+    },
+    {
+      "parameters": {
+        "jsCode": "const leadId = $json.existing_lead_id;\nconst conversationId = $json.threadId;\nconst newMessage = $json.body || '';\nconst newSubject = $json.subject || '';\nconst timestamp = new Date().toISOString();\n\n// Update the lead row to flag customer replied\nawait this.helpers.httpRequest({\n  method: 'PATCH',\n  url: `https://YOUR_PROJECT.supabase.co/rest/v1/crm_leads?id=eq.${leadId}`,\n  headers: {\n    'apikey': process.env.SUPABASE_KEY,\n    'Authorization': 'Bearer ' + process.env.SUPABASE_KEY,\n    'Content-Type': 'application/json',\n    'Prefer': 'return=minimal'\n  },\n  body: {\n    customer_replied: true,\n    email_body: newMessage,\n    email_subject: newSubject,\n    updated_at: timestamp\n  },\n  json: true\n});\n\nreturn [{ json: {\n  leadData: {\n    id: leadId,\n    path: $json.existing_path,\n    pricing_tier: $json.existing_pricing_tier,\n    extracted_city: $json.existing_city,\n    detected_language: $json.existing_language,\n    email_body: newMessage,\n    original_body: newMessage,\n    email_subject: newSubject,\n    conversation_id: conversationId,\n    sender_name: $json.from_name || '',\n    sender_email: $json.from_email || '',\n    product_requested: ''\n  }\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2272,
+        -96
+      ],
+      "id": "b05e59bf-ecfb-4e19-92a5-da93f9418f6f",
+      "name": "Update Existing Lead"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "2d4bb217-442f-4f61-85c4-5b651283981c",
+              "leftValue": "={{ $json.is_reply }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -1760,
+        -48
+      ],
+      "id": "0045551b-1467-455e-9e87-b2a836df1f9b",
+      "name": "Is Reply?"
+    },
+    {
+      "parameters": {
+        "jsCode": "const leadData = $input.first().json;\nconst leadId = leadData.id;\nconst conversationId = leadData.conversation_id;\nconst messageText = leadData.email_body || '';\nconst detectedLanguage = leadData.detected_language || 'en';\n\nif (!leadId || !conversationId) {\n  return [{ json: { ...leadData, log_skipped: true } }];\n}\n\nawait this.helpers.httpRequest({\n  method: 'POST',\n  url: 'https://YOUR_PROJECT.supabase.co/rest/v1/crm_email_messages',\n  headers: {\n    'apikey': process.env.SUPABASE_KEY,\n    'Authorization': 'Bearer ' + process.env.SUPABASE_KEY,\n    'Content-Type': 'application/json'\n  },\n  body: {\n    lead_id: leadId,\n    conversation_id: conversationId,\n    channel: 'email',\n    direction: 'inbound',\n    message_text: messageText,\n    detected_language: detectedLanguage\n  },\n  json: true\n});\n\nreturn [{ json: { ...leadData } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2272,
+        272
+      ],
+      "id": "33d46fee-6739-4003-9fe0-600559e9e975",
+      "name": "Log Inbound Message"
+    },
+    {
+      "parameters": {
+        "jsCode": "const reply = $input.first().json.reply || '';\nconst leadData = $input.first().json.leadData || {};\nconst leadId = leadData.id;\nconst conversationId = leadData.conversation_id;\n\nif (!leadId || !conversationId) {\n  return [{ json: $input.first().json }];\n}\n\nawait this.helpers.httpRequest({\n  method: 'POST',\n  url: 'https://YOUR_PROJECT.supabase.co/rest/v1/crm_email_messages',\n  headers: {\n    'apikey': process.env.SUPABASE_KEY,\n    'Authorization': 'Bearer ' + process.env.SUPABASE_KEY,\n    'Content-Type': 'application/json'\n  },\n  body: {\n    lead_id: leadId,\n    conversation_id: conversationId,\n    channel: 'email',\n    direction: 'outbound',\n    message_text: reply,\n    detected_language: leadData.detected_language || 'en'\n  },\n  json: true\n});\n\nreturn [{ json: $input.first().json }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4064,
+        -96
+      ],
+      "id": "df7ca55e-4c86-4c3c-8208-6807b141b213",
+      "name": "Log Outbound Message"
+    },
+    {
+      "parameters": {
+        "jsCode": "const inputData = $input.first().json;\nconst leadData = inputData?.leadData || {};\nconst leadId = leadData.id;\nconst conversationId = leadData.conversation_id;\nconst messageText = leadData.email_body || '';\nconst detectedLanguage = leadData.detected_language || 'en';\n\nif (!leadId || !conversationId) {\n  return [{ json: inputData }];\n}\n\nawait this.helpers.httpRequest({\n  method: 'POST',\n  url: 'https://YOUR_PROJECT.supabase.co/rest/v1/crm_email_messages',\n  headers: {\n    'apikey': process.env.SUPABASE_KEY,\n    'Authorization': 'Bearer ' + process.env.SUPABASE_KEY,\n    'Content-Type': 'application/json'\n  },\n  body: {\n    lead_id: leadId,\n    conversation_id: conversationId,\n    channel: 'email',\n    direction: 'inbound',\n    message_text: messageText,\n    detected_language: detectedLanguage\n  },\n  json: true\n});\n\nreturn [{ json: inputData }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2496,
+        -96
+      ],
+      "id": "a9909db3-fc9e-43dd-8a4d-ea20edfa83e2",
+      "name": "Log Inbound Message (Reply)"
+    },
+    {
+      "parameters": {
+        "jsCode": "const inputData = $input.first().json;\nconst leadData = inputData?.leadData || inputData || {};\nconst conversationId = leadData.conversation_id || null;\n\nlet history = [];\n\nif (conversationId) {\n  try {\n    const rows = await this.helpers.httpRequest({\n      method: 'POST',\n      url: 'https://YOUR_PROJECT.supabase.co/rest/v1/rpc/get_recent_email_messages',\n      headers: {\n        'apikey': process.env.SUPABASE_KEY,\n        'Authorization': 'Bearer ' + process.env.SUPABASE_KEY,\n        'Content-Type': 'application/json'\n      },\n      body: {\n        p_conversation_id: conversationId,\n        p_limit: 6\n      },\n      json: true\n    });\n    history = Array.isArray(rows) ? rows.reverse() : [];\n  } catch(e) {\n    history = [];\n  }\n}\n\nconst historyText = history.length > 0\n  ? history.map(m =>\n      `${m.direction === 'inbound' ? 'Customer' : 'System'}: ${m.message_text}`\n    ).join('\\n\\n')\n  : 'No previous conversation.';\n\nreturn [{ json: {\n  ...inputData,\n  leadData: {\n    ...leadData,\n    historyText\n  },\n  historyText\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2720,
+        -96
+      ],
+      "id": "5ec058f3-0206-45ef-b6cd-1f8059175efc",
+      "name": "Fetch Recent Messages"
+    },
+    {
+      "parameters": {
+        "jsCode": "const inputData = $input.first().json;\nconst leadData = inputData?.leadData || {};\n\n// Clean the text \u2014 strip control chars, quoted reply lines (>), and limit length\nfunction cleanText(text) {\n  return (text || '')\n    .split('\\n')\n    .filter(line => !line.trim().startsWith('>'))  // remove quoted reply lines\n    .join(' ')\n    .replace(/[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F]/g, '')  // remove control chars\n    .replace(/\\s+/g, ' ')  // normalize whitespace\n    .trim()\n    .substring(0, 300);\n}\n\nconst historyText = cleanText(inputData?.historyText || '');\nconst latestMessage = cleanText(leadData?.email_body || '');\n\nconst response = await this.helpers.httpRequest({\n  method: 'POST',\n  url: 'https://api.groq.com/openai/v1/chat/completions',\n  headers: {\n    'Authorization': 'Bearer ' + process.env.GROQ_API_KEY,\n    'Content-Type': 'application/json'\n  },\n  body: {\n    model: 'llama-3.3-70b-versatile',\n    stream: false,\n    temperature: 0,\n    max_tokens: 50,\n    messages: [\n      {\n        role: 'system',\n        content: 'You rewrite a customer\\'s most recent message into a self-contained English search query for a furniture product database.\\n\\nRULES:\\n- Output ONLY the rewritten query. No quotes, no preamble, no explanations.\\n- ALWAYS output something. Never refuse.\\n- If the message is already self-contained (mentions a product name or asks a clear question), output it UNCHANGED.\\n- If the message uses a pronoun or follow-up (\"how much?\", \"in walnut?\", \"that one\", \"it\"), resolve it using the conversation history.\\n- Keep the output short \u2014 under 20 words.\\n- Output in English.'\n      },\n      {\n        role: 'user',\n        content: 'Conversation history:\\n' + historyText + '\\n\\nMost recent message:\\n' + latestMessage\n      }\n    ]\n  },\n  json: true\n});\n\nconst rewrittenQuery = response?.choices?.[0]?.message?.content || latestMessage;\n\nreturn [{ json: {\n  ...inputData,\n  rewrittenQuery,\n  choices: response?.choices\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2944,
+        -96
+      ],
+      "id": "6858d94f-c797-459f-93e0-231aa0b82030",
+      "name": "Rewrite Query"
+    },
+    {
+      "parameters": {
+        "jsCode": "const inputData = $input.first().json;\nconst leadData = inputData?.leadData || {};\nconst context = inputData?.context || '';\n\nfunction cleanText(text) {\nreturn (text || '')\n.split('\\n')\n.filter(line => !line.trim().startsWith('>'))\n.join(' ')\n.replace(/[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F]/g, '')\n.replace(/\\s+/g, ' ')\n.trim()\n.substring(0, 500);\n}\n\nconst historyText = cleanText(inputData?.historyText || '');\nconst latestMessage = cleanText(leadData?.email_body || '');\nconst cleanContext = cleanText(context);\n\nconst prompt = `You are a sales assistant for Lumen Living, a luxury Vietnamese furniture brand.\n\nWrite a helpful reply email to the customer's LATEST message below.\n\nUse the conversation history only to understand context.\nUse ONLY the product information provided in the Product context.\nNever make up prices, dimensions, lead times, finishes, stock status, delivery details, discounts, or commercial terms.\n\nIMPORTANT OUTPUT RULE:\n\n* Return the email body only.\n* Do NOT return JSON.\n* Do NOT include a subject line.\n* Do NOT include explanations about what you are doing.\n\nLANGUAGE RULE:\n\n* Reply in the same language as the detected_language field below.\n\nEMAIL FORMAT RULES:\n\n* Start with: Hi [Customer Name],\n* Do NOT start with Dear.\n* Use short paragraphs with blank lines between sections.\n* Do NOT write the whole reply as one long paragraph.\n* Do NOT hard-wrap sentences across multiple lines.\n* Use bullet points only when listing multiple finishes, product options, or grouped product details.\n* End exactly with:\n  Kind regards,\n  Lumen Living Team\n\nCONTENT RULES:\n\n* Thank the customer for their interest.\n* Address every product the customer asked about by name.\n* Never mention products the customer did not ask about.\n* Do NOT repeat the same fact twice.\n* If price is available and allowed by the pricing rules, mention it once before Product details.\n* If dimensions, lead time, delivery location, or preferred delivery time are included, put them only under \"Product details:\" as bullet points.\n* If a requested finish or colour is unavailable but alternatives are available, explain this clearly in one paragraph.\n* If there are multiple available finishes, list them as bullet points.\n* If required information is missing, politely ask the customer to confirm it.\n* Do NOT mention CRM, score, tier, lead quality, internal routing, attribute scores, TP flags, or penalties.\n\nPRICING RULES \u2014 CRITICAL:\n\n* Customer path: ${leadData.path}\n* If path = 'consumer' \u2192 show RETAIL price only. Never mention B2B price, trade price, wholesale price, dealer price, or any discount.\n* If path = 'retail' \u2192 NEVER show retail price. ONLY quote B2B trade price if available in the context. End by directing them to na.lumenliving.com/pages/b2b-signup.\n\nPREFERRED STRUCTURE FOR CONSUMER:\nHi [Customer Name],\n\nThank you for your interest in [Product Name]. The retail price for this piece is [Retail Price].\n\nPlease note that [Unavailable Finish] is currently unavailable. However, we do have [Product Name] available in the following finishes:\n\n* [Available finish 1]\n* [Available finish 2]\n\nProduct details:\n\n* Dimensions: [Dimensions]\n* Estimated lead time: [Estimated lead time]\n* Delivery location: [Delivery location]\n* Preferred delivery time: [Preferred delivery time]\n\nPlease let us know if you would like to proceed, and we will be happy to confirm the next steps for you.\n\nKind regards,\nLumen Living Team\n\nPREFERRED STRUCTURE FOR RETAIL:\nHi [Customer Name],\n\nThank you for your enquiry about [Product Name]. We would be happy to assist with your trade or B2B request.\n\n[Quote B2B trade price only if available. If not available, say we can confirm trade pricing after receiving the required business details.]\n\nProduct details:\n\n* Dimensions: [Dimensions]\n* Estimated lead time: [Estimated lead time]\n* Available finishes: [Available finishes]\n\nTo continue with a trade enquiry, please complete the B2B signup form here: na.lumenliving.com/pages/b2b-signup\n\nKind regards,\nLumen Living Team\n\nIMPORTANT:\n\n* Follow the correct preferred structure based on the customer path.\n* Only include information that exists in the Product context.\n* Do not include placeholder text such as [Retail Price], [Dimensions], or [Available finish].\n* If a section has no available information, omit that section.\n* Keep \"Product details:\" as a separate section if product details exist.\n* Keep bullet points on separate lines.\n\nCustomer name: ${leadData.sender_name || ''}\nDetected language: ${leadData.detected_language || 'en'}\nCustomer path: ${leadData.path || ''}\nCustomer city: ${leadData.extracted_city || ''}\nCustomer district: ${leadData.extracted_district || ''}\n\nConversation history:\n${historyText || 'No previous conversation \u2014 this is the first message.'}\n\nCustomer's latest message:\n${latestMessage}\n\nProduct context:\n${cleanContext}`;\n\nconst response = await this.helpers.httpRequest({\nmethod: 'POST',\nurl: 'https://api.groq.com/openai/v1/chat/completions',\nheaders: {\n'Authorization': 'Bearer ' + process.env.GROQ_API_KEY,\n'Content-Type': 'application/json'\n},\nbody: {\nmodel: 'llama-3.3-70b-versatile',\nstream: false,\ntemperature: 0.2,\nmax_tokens: 700,\nseed: 0,\ntop_p: 1,\nmessages: [\n{\nrole: 'user',\ncontent: prompt\n}\n]\n},\njson: true\n});\n\nreturn [{ json: {\n...inputData,\nchoices: response?.choices\n}}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3392,
+        -96
+      ],
+      "id": "d17834a0-c751-4047-8b02-96f36e94d3c8",
+      "name": "LLM Generate Reply"
+    },
+    {
+      "parameters": {
+        "sendTo": "sales-notify@yourcompany.example",
+        "subject": "={{ \"Consumer reply sent \u2014 \" + ($('Update a row').first().json.sender_name || \"lead\") }}",
+        "emailType": "text",
+        "message": "={{ \"An auto-reply was sent to a consumer.\\n\\nLead: \" + ($('Update a row').first().json.sender_name || \"\") + \"\\nScore: \" + ($('Update a row').first().json.score ?? \"?\") + \" (\" + ($('Update a row').first().json.tier || \"\") + \")\" }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        4960,
+        -96
+      ],
+      "id": "756435f3-ad54-45a1-b26c-be66c1fca515",
+      "name": "Consumer notification",
+      "webhookId": "b3712eda-cbe5-457f-9349-38aa1d46f6e4",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Inbox Gmail (set your own)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "sales-notify@yourcompany.example",
+        "subject": "={{ \"Retail draft ready \u2014 \" + ($json.sender_name || \"lead\") + \" (\" + ($json.company_name || \"\") + \")\" }}",
+        "emailType": "text",
+        "message": "={{ \"A retail draft is ready on the dashboard.\\n\\nLead: \" + ($json.sender_name || \"\") + \"\\nCompany: \" + ($json.company_name || \"\") + \"\\nScore: \" + ($json.score ?? \"?\") + \" (\" + ($json.tier || \"\") + \")\\nAction: \" + ($json.recommended_action || \"\") }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        4736,
+        96
+      ],
+      "id": "7367bf70-7c65-49fd-b0ce-778dc42d27d2",
+      "name": "Retail notification1",
+      "webhookId": "3e99134d-0e33-4472-b005-bbf41e94b58b",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Inbox Gmail (set your own)"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Extract Email Fields": {
+      "main": [
+        [
+          {
+            "node": "Check Existing Thread",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Detect Path": {
+      "main": [
+        [
+          {
+            "node": "Parse Path",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Path": {
+      "main": [
+        [
+          {
+            "node": "Route by Path",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by Path": {
+      "main": [
+        [
+          {
+            "node": "LLM Extract K",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "LLM Extract Consumer",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "LLM Extract Retail",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Extract K": {
+      "main": [
+        [
+          {
+            "node": "Parse K Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Extract Consumer": {
+      "main": [
+        [
+          {
+            "node": "Parse Consumer Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Extract Retail": {
+      "main": [
+        [
+          {
+            "node": "Parse Retail Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse K Fields": {
+      "main": [
+        [
+          {
+            "node": "LLM Confidence Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Consumer Fields": {
+      "main": [
+        [
+          {
+            "node": "Map Consumer Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Retail Fields": {
+      "main": [
+        [
+          {
+            "node": "Map Retail Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Map K Fields": {
+      "main": [
+        [
+          {
+            "node": "Prep for Supabase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Map Consumer Fields": {
+      "main": [
+        [
+          {
+            "node": "Prep for Supabase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Map Retail Fields": {
+      "main": [
+        [
+          {
+            "node": "Prep for Supabase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prep for Supabase": {
+      "main": [
+        [
+          {
+            "node": "Insert Lead to Supabase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert Lead to Supabase": {
+      "main": [
+        [
+          {
+            "node": "Read Scored Row from Supabase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Scored Row from Supabase": {
+      "main": [
+        [
+          {
+            "node": "Log Inbound Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Generate Reasons": {
+      "main": [
+        [
+          {
+            "node": "Parse Reasons",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Reasons": {
+      "main": [
+        [
+          {
+            "node": "Update Reasons in Supabase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Reasons in Supabase": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Top Reasons": {
+      "main": [
+        [
+          {
+            "node": "Create Twenty Task",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Parse Top Reasons",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Field List": {
+      "main": [
+        [
+          {
+            "node": "Create Twenty Field",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Task Object ID": {
+      "main": [
+        [
+          {
+            "node": "Prepare Field List",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Translation Node": {
+      "main": [
+        [
+          {
+            "node": "Parse Original Body",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Original Body": {
+      "main": [
+        [
+          {
+            "node": "Spam Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Detect Path",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Spam Check": {
+      "main": [
+        [
+          {
+            "node": "LLM Spam Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch": {
+      "main": [
+        [
+          {
+            "node": "LLM Generate Reasons",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "LLM Generate Reasons Consumer",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "LLM Generate Reasons Retail",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Generate Reasons Consumer": {
+      "main": [
+        [
+          {
+            "node": "Parse Reasons",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "If1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Generate Reasons Retail": {
+      "main": [
+        [
+          {
+            "node": "Parse Reasons",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "If1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If1": {
+      "main": [
+        [
+          {
+            "node": "Find Relevant Chunks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Relevant Chunks": {
+      "main": [
+        [
+          {
+            "node": "LLM Generate Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Reply": {
+      "main": [
+        [
+          {
+            "node": "Translation reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Translation reply": {
+      "main": [
+        [
+          {
+            "node": "Log Outbound Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Spam Check": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript1": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Confidence Check": {
+      "main": [
+        [
+          {
+            "node": "Parse Confidence",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Confidence": {
+      "main": [
+        [
+          {
+            "node": "Map K Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lumen Living Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "Extract Email Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Acme AI Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "Extract Email Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If2": {
+      "main": [
+        [
+          {
+            "node": "Update a row",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Update a row1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update a row": {
+      "main": [
+        [
+          {
+            "node": "Reply to a message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Existing Thread": {
+      "main": [
+        [
+          {
+            "node": "Is Reply?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Reply?": {
+      "main": [
+        [
+          {
+            "node": "Update Existing Lead",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Translation Node",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Existing Lead": {
+      "main": [
+        [
+          {
+            "node": "Log Inbound Message (Reply)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Inbound Message": {
+      "main": [
+        [
+          {
+            "node": "Switch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Outbound Message": {
+      "main": [
+        [
+          {
+            "node": "If2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Inbound Message (Reply)": {
+      "main": [
+        [
+          {
+            "node": "Fetch Recent Messages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Recent Messages": {
+      "main": [
+        [
+          {
+            "node": "Rewrite Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rewrite Query": {
+      "main": [
+        [
+          {
+            "node": "Find Relevant Chunks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Generate Reply": {
+      "main": [
+        [
+          {
+            "node": "Parse Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reply to a message": {
+      "main": [
+        [
+          {
+            "node": "Consumer notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update a row1": {
+      "main": [
+        [
+          {
+            "node": "Retail notification1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  }
+}
