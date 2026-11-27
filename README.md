@@ -2,6 +2,11 @@
 
 ![Architecture](architecture.webp)
 
+### n8n workflow
+
+![n8n workflow part 1](n8n-canvas-1.png)
+![n8n workflow part 2](n8n-canvas-2.png)
+
 A production style n8n pipeline that turns inbound sales emails into scored,
 qualified CRM leads with grounded, language matched replies. Adapted from a
 system I built during my AI architecture internship at an AI consultancy, with
@@ -53,6 +58,14 @@ own language with a human review gate before anything is sent.
 - **Language matching.** Email is processed in English and answered in the
   sender's original language.
 
+## Impact
+
+- Designed to handle around 5,000 inbound emails per month.
+- Replaces manual inbox triage: every email is classified, scored and logged to the CRM within one pipeline run.
+- Scores leads across 3 business paths, each with 6 weighted attributes and penalties, fully in SQL so results are reproducible.
+- Holds every reply behind a human review status, so nothing high stakes is sent unchecked.
+- Replies in the sender's own language, with grounding from a pgvector knowledge base.
+
 ## Stack
 
 | Layer | Tool |
@@ -70,6 +83,8 @@ own language with a human review gate before anything is sent.
 icp-lead-pipeline.json   n8n workflow (import into n8n)
 sql/schema.sql           tables, scoring triggers, RAG and memory functions
 architecture.webp        architecture diagram
+n8n-canvas-*.png         n8n workflow screenshots
+src/                     readable copies of the 25 code nodes, by stage
 .env.example             environment variables to fill in
 ```
 
